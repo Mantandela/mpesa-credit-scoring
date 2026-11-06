@@ -6,11 +6,11 @@ Status: v0.2 (draft). Changes from v0.1: small mobile loans, new label definitio
 
 The synthetic dataset has three tables. All identifiers are synthetic or hashed. No real personal data is used.
 
-| Table | One row per | File (planned) |
-|---|---|---|
-| `transactions` | M-Pesa statement line | `data/synthetic/transactions.parquet` |
-| `vendors` | vendor | `data/synthetic/vendors.parquet` |
-| `loan_applications` | loan application | `data/synthetic/loan_applications.parquet` |
+| Table               | One row per           | File (planned)                             |
+| ------------------- | --------------------- | ------------------------------------------ |
+| `transactions`      | M-Pesa statement line | `data/synthetic/transactions.parquet`      |
+| `vendors`           | vendor                | `data/synthetic/vendors.parquet`           |
+| `loan_applications` | loan application      | `data/synthetic/loan_applications.parquet` |
 
 ---
 
@@ -18,37 +18,37 @@ The synthetic dataset has three tables. All identifiers are synthetic or hashed.
 
 Mimics an M-Pesa statement. The first seven columns follow the layout of a real statement; the last three are added by the generator.
 
-| Column | Type | Example | Description |
-|---|---|---|---|
-| `receipt_no` | string | `SK12AB34CD` | Unique transaction ID. Generated to look like an M-Pesa receipt (10 characters, letters and digits). |
-| `completion_time` | datetime | `2026-03-14 09:42:17` | Date and time the transaction completed (East Africa Time). |
-| `details` | string | `Customer Payment from CP_0412` | Free-text description, as on a real statement. Parsed in the cleaning stage to derive `txn_type`. |
-| `transaction_status` | string | `Completed` | `Completed` or `Failed`. Failed rows are rare and added on purpose to test cleaning. |
-| `paid_in` | float (KES) | `250.00` | Money received. 0 if the line is an outflow. |
-| `withdrawn` | float (KES) | `0.00` | Money paid out, including transaction charges. 0 if the line is an inflow. |
-| `balance` | float (KES) | `1840.00` | Running M-Pesa balance after the transaction. |
-| `vendor_id` | string | `V00031` | Synthetic vendor ID. Links to `vendors`. |
-| `counterparty_id` | string | `CP_0412` | Hashed ID of the other party (customer, supplier, biller). Real statements carry names or phone numbers inside `details`; here they are replaced by a hashed ID from the start. Blank for agent, airtime and fee lines. |
-| `txn_type_true` | string | `TILL_PAYMENT_IN` | The generator's own label for the transaction type. Used only to check that the cleaning stage classifies correctly. **Never a model input.** |
+| Column               | Type        | Example                         | Description                                                                                                                                                                                                             |
+| -------------------- | ----------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `receipt_no`         | string      | `SK12AB34CD`                    | Unique transaction ID. Generated to look like an M-Pesa receipt (10 characters, letters and digits).                                                                                                                    |
+| `completion_time`    | datetime    | `2026-03-14 09:42:17`           | Date and time the transaction completed (East Africa Time).                                                                                                                                                             |
+| `details`            | string      | `Customer Payment from CP_0412` | Free-text description, as on a real statement. Parsed in the cleaning stage to derive `txn_type`.                                                                                                                       |
+| `transaction_status` | string      | `Completed`                     | `Completed` or `Failed`. Failed rows are rare and added on purpose to test cleaning.                                                                                                                                    |
+| `paid_in`            | float (KES) | `250.00`                        | Money received. 0 if the line is an outflow.                                                                                                                                                                            |
+| `withdrawn`          | float (KES) | `0.00`                          | Money paid out, including transaction charges. 0 if the line is an inflow.                                                                                                                                              |
+| `balance`            | float (KES) | `1840.00`                       | Running M-Pesa balance after the transaction.                                                                                                                                                                           |
+| `vendor_id`          | string      | `V00031`                        | Synthetic vendor ID. Links to `vendors`.                                                                                                                                                                                |
+| `counterparty_id`    | string      | `CP_0412`                       | Hashed ID of the other party (customer, supplier, biller). Real statements carry names or phone numbers inside `details`; here they are replaced by a hashed ID from the start. Blank for agent, airtime and fee lines. |
+| `txn_type_true`      | string      | `TILL_PAYMENT_IN`               | The generator's own label for the transaction type. Used only to check that the cleaning stage classifies correctly. **Never a model input.**                                                                           |
 
 ### Transaction type taxonomy (`txn_type`)
 
 The cleaning stage derives `txn_type` from `details`. It should reproduce `txn_type_true`.
 
-| `txn_type` | Direction | Meaning |
-|---|---|---|
-| `TILL_PAYMENT_IN` | in | Customer pays the vendor's Lipa na M-Pesa till |
-| `SEND_MONEY_IN` | in | Person-to-person money received |
-| `SEND_MONEY_OUT` | out | Person-to-person money sent |
-| `DEPOSIT_AGENT` | in | Cash deposited at an agent |
-| `WITHDRAW_AGENT` | out | Cash withdrawn at an agent |
-| `BUY_GOODS_OUT` | out | Payment to a supplier's till |
-| `PAYBILL_OUT` | out | Bill payment (rent, electricity, water, school fees) |
-| `AIRTIME_OUT` | out | Airtime purchase |
-| `FULIZA_DRAW` | in | Fuliza overdraft used to cover a payment. Amounts are small, KES 50 to 1,000, typical about KES 220 |
-| `FULIZA_REPAY` | out | Fuliza repayment |
-| `FEE` | out | Transaction charge |
-| `REVERSAL` | in or out | Reversal of an earlier transaction |
+| `txn_type`        | Direction | Meaning                                                                                             |
+| ----------------- | --------- | --------------------------------------------------------------------------------------------------- |
+| `TILL_PAYMENT_IN` | in        | Customer pays the vendor's Lipa na M-Pesa till                                                      |
+| `SEND_MONEY_IN`   | in        | Person-to-person money received                                                                     |
+| `SEND_MONEY_OUT`  | out       | Person-to-person money sent                                                                         |
+| `DEPOSIT_AGENT`   | in        | Cash deposited at an agent                                                                          |
+| `WITHDRAW_AGENT`  | out       | Cash withdrawn at an agent                                                                          |
+| `BUY_GOODS_OUT`   | out       | Payment to a supplier's till                                                                        |
+| `PAYBILL_OUT`     | out       | Bill payment (rent, electricity, water, school fees)                                                |
+| `AIRTIME_OUT`     | out       | Airtime purchase                                                                                    |
+| `FULIZA_DRAW`     | in        | Fuliza overdraft used to cover a payment. Amounts are small, KES 50 to 1,000, typical about KES 220 |
+| `FULIZA_REPAY`    | out       | Fuliza repayment                                                                                    |
+| `FEE`             | out       | Transaction charge                                                                                  |
+| `REVERSAL`        | in or out | Reversal of an earlier transaction                                                                  |
 
 ### Validation rules (checked in the cleaning stage)
 
@@ -62,15 +62,15 @@ The cleaning stage derives `txn_type` from `details`. It should reproduce `txn_t
 
 ## 2. `vendors`
 
-| Column | Type | Example | Description |
-|---|---|---|---|
-| `vendor_id` | string | `V00031` | Primary key. |
-| `business_type` | string | `food_stall` | One of: `fresh_produce`, `food_stall`, `retail_kiosk`, `services` (salon, repairs), `second_hand_clothes`. |
-| `gender` | string | `female` | Synthetic, assigned independently of risk. Used **only** for the fairness check, never as a model feature. |
-| `start_date` | date | `2025-09-01` | First date in the vendor's statement. |
-| `months_of_history` | int | `13` | Length of the statement in months. |
-| `persona` | string | `seasonal` | Persona used by the generator. **Generator-only. Never a model input.** |
-| `latent_risk` | float (0 to 1) | `0.34` | Hidden underlying risk used to create loan outcomes. **Generator-only. Never a model input.** |
+| Column              | Type           | Example      | Description                                                                                                |
+| ------------------- | -------------- | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `vendor_id`         | string         | `V00031`     | Primary key.                                                                                               |
+| `business_type`     | string         | `food_stall` | One of: `fresh_produce`, `food_stall`, `retail_kiosk`, `services` (salon, repairs), `second_hand_clothes`. |
+| `gender`            | string         | `female`     | Synthetic, assigned independently of risk. Used **only** for the fairness check, never as a model feature. |
+| `start_date`        | date           | `2025-09-01` | First date in the vendor's statement.                                                                      |
+| `months_of_history` | int            | `13`         | Length of the statement in months.                                                                         |
+| `persona`           | string         | `seasonal`   | Persona used by the generator. **Generator-only. Never a model input.**                                    |
+| `latent_risk`       | float (0 to 1) | `0.34`       | Hidden underlying risk used to create loan outcomes. **Generator-only. Never a model input.**              |
 
 ---
 
@@ -78,26 +78,26 @@ The cleaning stage derives `txn_type` from `details`. It should reproduce `txn_t
 
 Supports the lender flow (the lender assesses a vendor when the vendor applies) and the affordability simulation.
 
-| Column | Type | Example | Description |
-|---|---|---|---|
-| `application_id` | string | `A000212` | Primary key. |
-| `vendor_id` | string | `V00031` | Links to `vendors`. |
-| `application_date` | date | `2026-02-10` | Date of application. **Only transactions before this date may be used to build features for this application.** |
-| `requested_amount` | float (KES) | `5000` | Amount the vendor applies for. Small mobile loan: KES 500 to 10,000, median about 5,000 (see `personas.md`). |
-| `requested_term_days` | int | `30` | Requested repayment period, 7 to 30 days. |
-| `defaulted` | int (0 or 1) | `0` | **Target label.** 1 if the loan was not repaid at all (serious non-payment). Generated from `latent_risk` plus random noise (see `personas.md`). Target rate about 16.6%. |
-| `days_past_due` | int | `0` | Days late at the end of the observation window. 0 if repaid on time. |
-| `late_or_default` | int (0 or 1) | `0` | 1 if `defaulted` is 1 or `days_past_due` is at least 1. Used only for the "late or default" stress scenario (about 61% in the stress run). **Never a model input.** |
+| Column                | Type         | Example      | Description                                                                                                                                                               |
+| --------------------- | ------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `application_id`      | string       | `A000212`    | Primary key.                                                                                                                                                              |
+| `vendor_id`           | string       | `V00031`     | Links to `vendors`.                                                                                                                                                       |
+| `application_date`    | date         | `2026-02-10` | Date of application. **Only transactions before this date may be used to build features for this application.**                                                           |
+| `requested_amount`    | float (KES)  | `5000`       | Amount the vendor applies for. Small mobile loan: KES 500 to 10,000, median about 5,000 (see `personas.md`).                                                              |
+| `requested_term_days` | int          | `30`         | Requested repayment period, 7 to 30 days.                                                                                                                                 |
+| `defaulted`           | int (0 or 1) | `0`          | **Target label.** 1 if the loan was not repaid at all (serious non-payment). Generated from `latent_risk` plus random noise (see `personas.md`). Target rate about 16.6%. |
+| `days_past_due`       | int          | `0`          | Days late at the end of the observation window. 0 if repaid on time.                                                                                                      |
+| `late_or_default`     | int (0 or 1) | `0`          | 1 if `defaulted` is 1 or `days_past_due` is at least 1. Used only for the "late or default" stress scenario (about 61% in the stress run). **Never a model input.**       |
 
 ---
 
 ## 4. Derived tables (later stages)
 
-| Table | Created in | Description |
-|---|---|---|
-| `transactions_clean` | Stage 2 (cleaning) | Cleaned transactions with `txn_type`, parsed dates and validation flags |
-| `features` | Stage 3 (features) | One row per loan application with rolling 30/60/90-day features, built only from data before `application_date` |
-| `train`, `val`, `test` | Stage 4 (split) | Splits of the feature table with the `defaulted` label |
+| Table                  | Created in         | Description                                                                                                     |
+| ---------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `transactions_clean`   | Stage 2 (cleaning) | Cleaned transactions with `txn_type`, parsed dates and validation flags                                         |
+| `features`             | Stage 3 (features) | One row per loan application with rolling 30/60/90-day features, built only from data before `application_date` |
+| `train`, `val`, `test` | Stage 4 (split)    | Splits of the feature table with the `defaulted` label                                                          |
 
 These will be documented here when they exist.
 
@@ -105,8 +105,142 @@ These will be documented here when they exist.
 
 ## 5. Public datasets
 
-| Dataset | Source | Licence | Used for |
-|---|---|---|---|
-| (to fill in) | | | |
+Status: v0.3. Final list agreed: five datasets, none of them with Kenyan M-Pesa repayment outcomes. Home Credit and the Taiwan credit card data were dropped. Place the files in `data/raw/` (flat, no subfolders), run `scripts/download_public_data.py` to log their sources, then `scripts/profile_public_data.py`, which writes the column-level profile to `docs/public_data_profile.csv`. Column lists marked "confirm" below must be checked against that profile.
 
-Record the source URL, download date and licence for each dataset in `data/raw/`.
+These datasets are never merged with the synthetic data (see `personas.md`). Each has a separate, stated role.
+
+### 5.1 Final list
+
+| Dataset                                                                                  | File in `data/raw/`         | Source                                                                                                                                                               | Licence                                                     | Label                                                      | Role in this project                                                                                                   |
+| ---------------------------------------------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Synthetic Mobile Money Transaction Dataset (MoMTSim; Azamuke, Makerere University, 2024) | `momt_dataset.csv`          | https://data.mendeley.com/datasets/zhj366m53p/2 (doi 10.17632/zhj366m53p.2)                                                                                          | CC BY 4.0                                                   | fraud (not default)                                        | Reference for mobile money transaction types, amounts and balances. Manual download.                                   |
+| Kenya mobile money data, about 6,000 rows                                                | `kenya_mobile_money_6k.csv` | GitHub repository (**fill URL**)                                                                                                                                     | **confirm** (reference only if none is stated)              | none known                                                 | Format reference only. Origin to be confirmed. Manual download.                                                        |
+| PaySim                                                                                   | `paysim_dataset.csv`        | https://www.kaggle.com/datasets/ealaxi/paysim1                                                                                                                       | CC BY-SA 4.0 (confirmed on the Kaggle page)                 | `isFraud` (fraud, not default)                             | Reference for the transaction type taxonomy and statement structure. About 6.4 million rows.                           |
+| Statlog German Credit                                                                    | `uci_german_credit.data`    | https://archive.ics.uci.edu/dataset/144/statlog+german+credit+data                                                                                                   | CC BY 4.0 (confirmed on the UCI page)                       | good or bad credit, 30% bad                                | Only dataset with real credit outcomes. Sanity check for the scorecard baseline. 1,000 rows, German, not mobile money. |
+| FinAccess 2021 household survey report (CBK, KNBS, FSD Kenya, 2022)                      | `finacess.pdf`              | PDF report, 88 pages, from https://statistics.knbs.or.ke/nada/index.php/catalog/104/related-materials. Microdata is a separate download from KNBS (not yet obtained) | Published report; cite with attribution (terms not checked) | none (published figures on borrowing and default, no rows) | Source of real Kenyan figures on Fuliza use and loan default. Nothing to profile as a table.                           |
+
+### 5.2 MoMTSim and the 6,000-row file: columns (confirm)
+
+Column names come from the first rows of each file as pasted. Check both against the full files. The 6,000-row file also has a `status` column (Completed, Failed, Reversed), `channel` and `transaction_id`.
+
+| Field in a statement       | MoMTSim column                                                             | 6,000-row file column                                                                                                 | Note                                                                                                                |
+| -------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Completion time            | `step`                                                                     | `transaction_timestamp` (date and time, for example 1/1/2024 7:51)                                                    | An hour-style index only, no date or clock time. All 24 rows seen are `step` 0. Confirm the unit in the paper.      |
+| Transaction type / Details | `transactionType`                                                          | `transaction_type`, `merchant_category`                                                                               | Only PAYMENT and TRANSFER seen in 24 rows. No free-text Details like "Funds received from...".                      |
+| Paid in / Withdrawn        | `amount`                                                                   | `amount_kes`, `transaction_fee_kes`                                                                                   | One unsigned column. The initiator is the one paying out (Withdrawn). The recipient is the one receiving (Paid In). |
+| Balance                    | `oldBalInitiator`, `newBalInitiator`, `oldBalRecipient`, `newBalRecipient` | `balance_after_kes` (not a running balance, see below)                                                                | Balance before and after for both sides.                                                                            |
+| Account / vendor ID        | `initiator`, `recipient`                                                   | `customer_id` (also `customer_name`, `gender`, `age`, `county`, `phone_number`, `device_type`: personal-data columns) | Long numeric IDs for people (store as text, not numbers). Merchants look like `NN-NNNNNNN`.                         |
+| Label                      | `isFraud`                                                                  | none                                                                                                                  | Fraud, not default.                                                                                                 |
+
+**Checked on the first 179 rows (pasted table with `isFraud`; confirm on the full file):**
+
+- Columns are as listed above, ending with `isFraud`. All rows have `step` 0. 78 PAYMENT, 101 TRANSFER. No other types appear.
+- **Fraud labels:** `isFraud` = 1 on 100 of 101 transfers and 0 on every payment. So in this sample fraud is 56% of rows, and "TRANSFER" almost equals "fraud". The one transfer labelled 0 is the account that had gone negative (balance -587.82 to -41,436.02).
+- PAYMENT amounts are narrow: median about 586, middle half about 560 to 606, maximum 1,168. TRANSFER amounts vary widely: median about 12,000, from under 1 to 411,636. The currency is not stated.
+- **Failed payments:** 48 of 78 payments (62%) leave the initiator's balance unchanged and the merchant's balance unchanged. In every one of them the amount is larger than the balance. There is no status column, so a failed payment can only be inferred.
+- **Transfers fall into three groups, all labelled fraud except the one above:**
+  - 71 move the whole balance to 0 (median amount only about 82). All are fraud.
+  - 21 move part of the balance (median about 18,000). 20 of the 21 are fraud.
+  - 9 leave the balance unchanged (failed attempts, median about 22,000). All are fraud, so the label marks the attempt and not only a completed theft.
+- **Repeat accounts:** 148 distinct initiators. 30 of them make one PAYMENT of about 500 to 700 followed immediately by one TRANSFER of about 17,000 to 44,000. This looks like a "small test payment, then a large transfer" fraud pattern.
+- **Overdraft:** only one account in 179 rows has a negative balance. Failed payments are far more common than overdrafts, so MoMTSim does not model Fuliza-style borrowing.
+- **The sample is not representative.** Fraud is 56% of these rows, which is far above a real fraud rate. Do not estimate the fraud rate, the transaction mix or typical amounts from it. A random sample of the full file would show the real proportions.
+- IDs: initiators and person recipients are 16-digit numbers (store as text). Merchants are `NN-NNNNNNN`. Only 2 merchant IDs repeat.
+- There is no Details text, no status, no fee and no loan or Fuliza line. It cannot show anything about repayment.
+
+**6,000-row Kenya file: checked on about 300 rows (pasted, 1 to 13 January 2024; confirm on the full file):**
+
+- 16 columns: `transaction_id`, `transaction_timestamp`, `customer_id`, `customer_name`, `gender`, `age`, `county`, `phone_number`, `channel`, `transaction_type`, `merchant_category`, `device_type`, `amount_kes`, `transaction_fee_kes`, `balance_after_kes`, `status`.
+- **Channels:** mostly M-Pesa, with Airtel Money, Equitel and T-Kash mixed in. Filter on `channel` = M-Pesa for an M-Pesa-only view.
+- **Transaction types:** Buy Goods (Till), Send Money, Pay Bill, Withdraw Cash, Deposit Cash, Airtime Purchase, Reversal. `merchant_category` names the till or paybill type (Hardware, Restaurant, Rent, School Fees, SACCO, Electricity (KPLC), Loan Repayment and so on) and is N/A for the rest.
+- **Status:** Completed, Failed and Reversed. Failed and Reversed rows have a fee of 0.
+- **Fees:** in a few discrete values (0, 15, 33, 40, 45, 55, 62, 87, 100, 105, 108), like a tariff table.
+- **Amounts are large compared with your statement:** Pay Bill 4,000 to 146,000, Send Money 1,600 to 65,000, Buy Goods 2,700 to 25,000, Deposit Cash up to 117,000. Your own statement has a median received of KES 350.
+- **Direction:** `amount_kes` is unsigned. Deposit Cash and Reversal add money, the other types take it out, as inferred from the types.
+- **Balance is not a running balance.** The same customer's `balance_after_kes` jumps around: for example one customer goes from about 227,000 to 10,700 after a deposit of 35,575, and another from about 124,000 to 8,400 to 224,000 over a few days. It cannot be used to check balances or to build balance features.
+- **Customer details look random:** gender often does not match the first name, and ages run from 18 to 72 without a pattern. Each customer's own name, age, county and phone number stay the same across rows. About 800 customers (IDs up to about CUST00791) with a few rows each.
+- **Overall assessment: almost certainly synthetic** (random balances, tariff-like fees, mismatched genders). It is not real M-Pesa data.
+- There is no repayment label, no loan or Fuliza line (one "Loan Repayment" pay bill category only), no Details text and no receipt number.
+- **Personal-data columns:** `customer_name` and `phone_number` look like real names and numbers. Even if generated, remove them before the file goes into your repository, and do not publish them in your report.
+
+### 5.3 PaySim: columns (reference only)
+
+| Column                                                                | Description                                           | Maps to project `txn_type`                                                                                       |
+| --------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `step`                                                                | Hour of simulated time                                | `completion_time`                                                                                                |
+| `type`                                                                | `CASH_IN`, `CASH_OUT`, `DEBIT`, `PAYMENT`, `TRANSFER` | `DEPOSIT_AGENT`, `WITHDRAW_AGENT`, (none), `BUY_GOODS_OUT` or `PAYBILL_OUT`, `SEND_MONEY_IN` or `SEND_MONEY_OUT` |
+| `amount`                                                              | Amount of the transaction                             | `paid_in` or `withdrawn`                                                                                         |
+| `nameOrig`, `nameDest`                                                | Sender and receiver IDs                               | `counterparty_id`                                                                                                |
+| `oldbalanceOrg`, `newbalanceOrig`, `oldbalanceDest`, `newbalanceDest` | Balances before and after                             | `balance`                                                                                                        |
+| `isFraud`, `isFlaggedFraud`                                           | Fraud labels                                          | not used                                                                                                         |
+
+**Checked on the first 99 rows (the sample sent for profiling; confirm on the full file):**
+
+- All 11 columns are as listed above. No missing values. Every row is from `step` 1 (the first hour), and every `nameOrig` appears once, so this sample cannot show one account over time. Use the full file to check repeat accounts.
+- `type` in the sample: PAYMENT 55, TRANSFER 24, CASH_OUT 10, DEBIT 10 (CASH_IN does not appear in these rows).
+- Median amounts by type: PAYMENT about 4,300, DEBIT about 5,400, CASH_OUT about 70,000, TRANSFER about 268,000. These are far larger than the KES values in your statement, so PaySim is not used for amounts. Use it for structure only.
+- `nameDest` starting with `M` marks a merchant (all PAYMENT rows). Merchant balances are always 0, so there is no merchant balance history.
+- The sender's balance does not always satisfy old balance minus amount equals new balance. This held for only 45% of the sample rows, because the simulator sets the new balance to 0 when the amount exceeds the balance. It does not model overdrafts, unlike Fuliza.
+- `isFraud` = 1 for 2 of 99 rows (both TRANSFER or CASH_OUT of the full balance). `isFlaggedFraud` is 0 throughout.
+- There is no text field like the "Details" column, no fees, no loans and no Fuliza lines. It cannot show anything about repayment.
+
+### 5.4 Statlog German Credit: columns
+
+The data file `german.data` has no header, space-separated, 20 attributes plus the class. Confirm the coding against `german.doc`.
+
+| #   | Attribute                                      | Type        |
+| --- | ---------------------------------------------- | ----------- |
+| 1   | Status of existing checking account            | categorical |
+| 2   | Duration in months                             | numeric     |
+| 3   | Credit history                                 | categorical |
+| 4   | Purpose                                        | categorical |
+| 5   | Credit amount                                  | numeric     |
+| 6   | Savings account / bonds                        | categorical |
+| 7   | Present employment since                       | categorical |
+| 8   | Instalment rate as % of disposable income      | numeric     |
+| 9   | Personal status and sex                        | categorical |
+| 10  | Other debtors / guarantors                     | categorical |
+| 11  | Present residence since                        | numeric     |
+| 12  | Property                                       | categorical |
+| 13  | Age in years                                   | numeric     |
+| 14  | Other instalment plans                         | categorical |
+| 15  | Housing                                        | categorical |
+| 16  | Number of existing credits at this bank        | numeric     |
+| 17  | Job                                            | categorical |
+| 18  | Number of people liable to provide maintenance | numeric     |
+| 19  | Telephone                                      | categorical |
+| 20  | Foreign worker                                 | categorical |
+| 21  | **Class** (target): 1 = good, 2 = bad          | label       |
+
+**Checked on the downloaded `german.data` file:**
+
+- 1,000 rows and 21 columns, no header, space-separated, no missing values. Column names in the profile script are assigned from the list above.
+- **Class:** 700 good (1) and 300 bad (2), so 30% bad, as documented.
+- **Numeric ranges:** duration 4 to 72 months (median 18); credit amount 250 to 18,424 Deutsche Marks (median 2,320); age 19 to 75 (median 33); instalment rate 1 to 4; existing credits 1 to 4.
+- **Categorical columns are coded** as `A11`, `A12` and so on (for example `A11` to `A14` for the checking account: below 0 DM, 0 to 200 DM, 200 DM or more, no checking account). The full meaning of every code is in `german.doc`, which is in the same download. Decode them before reporting.
+- **Quick signal check:** the share of bad loans falls with the checking account status (49% for `A11`, 39% for `A12`, 22% for `A13`, 12% for `A14`) and rises with duration (21% up to 12 months, 30% for 13 to 24, 44% above 24). So the file carries usable signal for a baseline scorecard.
+- It has no transactions, no dates and no mobile money. Credit amounts are in a different currency and scale from your loans, so use it only to test the modelling pipeline.
+
+### 5.5 FinAccess 2021 household survey report: figures used
+
+What you have is the report (PDF, 88 pages, produced June 2022), not the household-level microdata, so there are no columns to profile. The microdata is released by KNBS (the report says links are on the CBK and FSD Kenya websites); it was not downloaded. The figures below were read from the report text. Confirm the page numbers against the printed pages.
+
+| Topic                              | Figure (2021)                                                                                                                            | Where                         | Use here                                                                                                                             |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Sample                             | 30,600 households in 1,700 enumeration areas, weighted to national and county level                                                      | Section 1.4 (Sampling)        | Describe the survey in the report.                                                                                                   |
+| Fuliza use                         | 18.3% of respondents had used Fuliza in the last 12 months. Fuliza was launched in January 2019                                          | Section 3.1, p. 25            | Matches the 18.4% in the 2024 report (`assumptions.md` row 7b), so Fuliza use is stable at about 18%.                                |
+| Default definition                 | Missing a scheduled repayment, paying late, or not paying at all, over the 12 months before the survey                                   | Section 4.4, p. 48            | Defines the labels `defaulted` and `late_or_default`.                                                                                |
+| Did not pay at all                 | 10.7% of those who had borrowed                                                                                                          | Section 4.4, Table 4.1, p. 48 | Matches the "up from 10.7%" in the 2024 report. Supports row 10a.                                                                    |
+| Paid less than expected            | 12.4%                                                                                                                                    | Table 4.1                     |                                                                                                                                      |
+| Missed a payment or paid late      | 45.8% in Table 4.1. The text of the same section says 38.2% paid late                                                                    | Table 4.1 and text, p. 48     | The two figures disagree inside the report. Quote the table and note the text figure, or use the 2024 report instead.                |
+| Providers with the most defaulters | Mobile banking loans (including Fuliza), digital app loans, and loans from family or friends. Employer loans perform best                | Section 4.4, Figure 4.8       | Supports treating mobile loans as the highest-default group.                                                                         |
+| Coping with default                | 43.3% of borrowers used savings to repay, and 29.6% took a new loan to repay an existing one                                             | Section 4.4, Figure 4.9       | Background for the "struggling" persona.                                                                                             |
+| Livelihood                         | 30% of respondents earn mainly from casual labour, 18% from agriculture. Formal prudential access: 78.2% employed, 59.7% business owners | Sections 5.4 and 2.3.5        | Context for informal-sector vendors.                                                                                                 |
+| Informal-sector default rate       | Not given                                                                                                                                | none                          | The report does not split default by informal sector, so the gap in `assumptions.md` stays. It might be possible from the microdata. |
+
+### 5.6 What each dataset can and cannot show
+
+- **MoMTSim, the 6,000-row file and PaySim:** how a mobile money transaction table looks. Their labels are fraud, not default, so they say nothing about repayment.
+- **German Credit:** whether the modelling approach (logistic regression, Random Forest, XGBoost, SHAP, calibration) works on real credit outcomes. It has no transactions and is small, so results are only a sanity check.
+- **FinAccess:** the only source of real Kenyan borrower outcomes. You have the 2021 report (figures only). It gives default and Fuliza rates, but not an informal-sector-only rate. The microdata could, if you download it.
+- **Together:** none contains M-Pesa-style transactions linked to repayment outcomes. The model is trained and tested on synthetic labels. State this in the limitations.
