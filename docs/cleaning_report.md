@@ -30,6 +30,7 @@
 | flag_future_date | 0 |
 | flag_negative | 0 |
 | flag_unknown_wording | 0 |
+| duplicate receipt_no across the whole file | 0 |
 | is_failed (status Failed) | 14,945 |
 | fuliza_funded payments | 27,210 |
 

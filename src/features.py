@@ -1,7 +1,7 @@
 """Stage 3: features (docs/data_dictionary.md section 4).
 
 One row per loan application. Every feature is built ONLY from cleaned transactions completed before the
-application date (strictly earlier than midnight at the start of `application_date`). The label is `defaulted`.
+application date (strictly earlier than midnight at the start of `application_date`). No outcome is used here.
 
 Run from the repo root:
     python src/features.py                      reads data/interim/transactions_clean and data/synthetic/{vendors,loan_applications}
@@ -12,8 +12,8 @@ Writes:
     data/processed/feature_columns.json      which columns are features and which are meta (ids, labels, slicing columns)
     docs/feature_report.md                   missing values per feature and a quick signal check
 
-Never features: persona, latent_risk, txn_type_true, gender (fairness check only), business_type, days_past_due,
-late_or_default. They are kept in the meta columns for slicing and checking only.
+Never features: persona, latent_risk, hidden_shock, txn_type_true, gender (fairness check only), business_type and every
+outcome column. They are kept in the meta columns for slicing and checking only.
 Missing values are left as NaN on purpose (for example a ratio with no income). Impute inside the model pipeline.
 """
 import argparse
@@ -26,8 +26,8 @@ WINDOWS = (30, 60, 90)
 INCOME = ("TILL_PAYMENT_IN", "SEND_MONEY_IN")
 PAYMENT_OUT = ("SEND_MONEY_OUT", "BUY_GOODS_OUT", "PAYBILL_OUT", "AIRTIME_OUT")
 NEAR_ZERO = 100                       # KES. End-of-day balance below this counts as near zero
-META = ["application_id", "vendor_id", "application_date", "defaulted", "days_past_due", "late_or_default",
-        "business_type", "gender", "persona"]
+META = ["application_id", "vendor_id", "application_date", "business_type", "gender", "persona"]
+# Outcome and hidden columns (defaulted, repayment_status, hidden_shock, latent_risk, ...) are added by src/scorecard.py.
 
 
 def load(d, name):
@@ -150,6 +150,19 @@ def build_row(g: pd.DataFrame, app) -> dict:
     b90 = bal.iloc[-int(obs90):] if obs90 >= 1 else bal.iloc[0:0]
     row["balance_median_eod_90"] = float(b90.median()) if len(b90) else np.nan
     row["balance_min_eod_90"] = float(b90.min()) if len(b90) else np.nan
+    row["balance_cv_90"] = _div(b90.std(ddof=0), b90.mean()) if len(b90) >= 14 and b90.mean() > 0 else np.nan
+    if len(bal) >= 45:                          # balance trend: last 30 days against the 60 days before
+        last, prev = bal.iloc[-30:], bal.iloc[-90:-30]
+        row["balance_trend_90"] = _div(last.median(), prev.median()) if prev.median() > 0 else np.nan
+    else:
+        row["balance_trend_90"] = np.nan
+    # cash-flow ratios (docs/scorecard_mapping.md). Spending = payments out and fees; cash taken out at an agent is not spending.
+    spend = w90[w90.txn_type.isin(PAYMENT_OUT + ("FEE",))].withdrawn.sum()
+    essential = w90[w90.txn_type.isin(("PAYBILL_OUT", "AIRTIME_OUT"))].withdrawn.sum()
+    row["net_cash_flow_ratio_90"] = _div(income[90] - spend, income[90])
+    row["essential_outflow_share_90"] = _div(essential, w90[w90.txn_type.isin(PAYMENT_OUT)].withdrawn.sum())
+    row["free_cash_flow_ratio_90"] = _div(income[90] - essential, income[90])
+    row["debt_service_ratio_90"] = _div(w90.loc[w90.txn_type == "FULIZA_REPAY", "withdrawn"].sum(), income[90])
     # affordability: the loan against what the vendor takes in
     row["amount_to_income_30"] = _div(app.requested_amount, income[30])
     row["amount_to_avg_monthly_income_90"] = _div(app.requested_amount, income[90] * 30.0 / obs90 if obs90 else np.nan)
@@ -182,6 +195,43 @@ def leakage_test(tx: pd.DataFrame, apps: pd.DataFrame, n=25, seed=1):
     return bad
 
 
+TX_COLUMNS = ["vendor_id", "completion_time", "txn_type", "is_failed", "fuliza_funded", "paid_in", "withdrawn",
+              "balance", "counterparty_id"]
+
+
+def build_in_chunks(path: str, apps: pd.DataFrame):
+    """Same result as build(), reading the cleaned file one parquet row group (a block of whole vendors) at a time.
+    Returns the features and a map vendor -> row group, which the leakage test needs."""
+    import pyarrow.parquet as pq
+    pf = pq.ParquetFile(path)
+    parts, rg_of = [], {}
+    for i in range(pf.num_row_groups):
+        tx = pf.read_row_group(i, columns=TX_COLUMNS).to_pandas()
+        tx["completion_time"] = pd.to_datetime(tx["completion_time"])
+        vids = tx.vendor_id.unique()
+        split = [v for v in vids if v in rg_of]
+        if split:
+            raise SystemExit(f"Vendor {split[0]} appears in more than one row group of {path}. The cleaned file must keep whole "
+                             "vendors together. Re-run the current src/clean.py (it writes one row group per 50 vendors) and try again.")
+        rg_of.update({v: i for v in vids})
+        sub = apps[apps.vendor_id.isin(vids)]
+        if len(sub):
+            parts.append(build(tx, sub))
+        print(f"  features: chunk {i + 1}/{pf.num_row_groups}", flush=True)
+    return pd.concat(parts).reindex(apps.index), rg_of, pf
+
+
+def leakage_test_chunked(pf, rg_of, apps: pd.DataFrame, n=25, seed=1) -> int:
+    """Leakage test for a chunked file: loads only the row groups that hold the sampled applications."""
+    sample = apps.sample(min(n, len(apps)), random_state=seed)
+    bad = 0
+    for i, sub in sample.groupby(sample.vendor_id.map(rg_of)):
+        tx = pf.read_row_group(int(i), columns=TX_COLUMNS).to_pandas()
+        tx["completion_time"] = pd.to_datetime(tx["completion_time"])
+        bad += leakage_test(tx, sub, n=len(sub))
+    return bad
+
+
 def auc(x: pd.Series, y: pd.Series) -> float:
     """Rank-based AUC of one feature against a 0/1 label. 0.5 means no signal. NaN rows are skipped."""
     d = pd.DataFrame({"x": x, "y": y}).dropna()
@@ -194,21 +244,13 @@ def auc(x: pd.Series, y: pd.Series) -> float:
 
 def report(df, feats, leaks):
     n = len(df)
-    L = ["# Feature report", "", f"{n:,} applications, {len(feats)} features, default rate {df.defaulted.mean():.1%}", ""]
+    L = ["# Feature report", "", f"{n:,} applications, {len(feats)} features. Outcomes are made later by src/scorecard.py; "
+         "the signal check against them is in docs/scorecard_report.md.", ""]
     L += [f"Leakage test: {'PASS, no feature changed when later transactions were deleted' if leaks == 0 else f'FAIL, {leaks} values changed'}"
           if leaks is not None else "Leakage test: skipped", ""]
     miss = df[feats].isna().mean().sort_values(ascending=False)
     L += ["## Missing values (share of applications)", "", "| feature | missing |", "|---|---|"]
     L += [f"| {k} | {v:.1%} |" for k, v in miss[miss > 0].items()] or ["| none | 0% |"]
-    a = pd.Series({f: auc(df[f], df.defaulted) for f in feats}).dropna()
-    s = (a - 0.5).abs().sort_values(ascending=False)
-    L += ["", "## Single-feature signal (AUC against `defaulted`; 0.5 = none, above 0.5 = higher value, more default)", "",
-          "| feature | AUC |", "|---|---|"]
-    L += [f"| {k} | {a[k]:.3f} |" for k in s.index[:15]]
-    best = s.index[0]
-    strength = 0.5 + s.iloc[0]
-    L += ["", f"Strongest single feature: {best}, strength {strength:.3f} (an AUC of {a[best]:.3f} means the same as {strength:.3f} read the other way round). "
-          "Strengths above about 0.85 would suggest the label leaks into the features and should be investigated."]
     return "\n".join(L) + "\n"
 
 
@@ -221,22 +263,33 @@ def main():
     ap.add_argument("--skip-check", action="store_true")
     a = ap.parse_args()
 
-    tx = load(a.clean, "transactions_clean")
-    tx["completion_time"] = pd.to_datetime(tx["completion_time"])
     apps = load(a.dir, "loan_applications")
     apps["application_date"] = pd.to_datetime(apps["application_date"])
     ve = load(a.dir, "vendors")
 
-    feat = build(tx, apps)
-    out = pd.concat([apps[["application_id", "vendor_id", "application_date", "defaulted", "days_past_due", "late_or_default"]]
-                     .reset_index(drop=True), feat.reset_index(drop=True)], axis=1)
+    src = os.path.join(a.clean, "transactions_clean.parquet")
+    chunked = False
+    if os.path.exists(src):
+        try:
+            import pyarrow.parquet as pq
+            chunked = pq.ParquetFile(src).num_row_groups > 1
+        except ImportError:
+            pass
+    if chunked:                                       # big file: one block of vendors in memory at a time
+        feat, rg_of, pf = build_in_chunks(src, apps)
+    else:
+        tx = load(a.clean, "transactions_clean")
+        tx["completion_time"] = pd.to_datetime(tx["completion_time"])
+        feat = build(tx, apps)
+    out = pd.concat([apps[["application_id", "vendor_id", "application_date"]].reset_index(drop=True),
+                     feat.reset_index(drop=True)], axis=1)
     out = out.merge(ve[["vendor_id", "business_type", "gender", "persona"]], on="vendor_id", how="left")
     feats = [c for c in out.columns if c not in META]
     out = out[META + feats]
 
     leaks = None
     if not a.skip_check:
-        leaks = leakage_test(tx, apps)
+        leaks = leakage_test_chunked(pf, rg_of, apps) if chunked else leakage_test(tx, apps)
         print("Leakage test:", "PASS" if leaks == 0 else f"FAIL ({leaks} values changed)")
 
     p = save(out, a.out, "features")
