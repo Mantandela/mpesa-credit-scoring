@@ -69,9 +69,14 @@ def main():
     draws = tx[tx.txn_type_true == "FULIZA_DRAW"].paid_in
     flag((draws <= 1000).all() and (draws >= 50).all(), f"Fuliza draws between 50 and 1,000 (median {draws.median():.0f}, mean {draws.mean():.0f})")
     # outcome window: every application must have OBS_WINDOW_DAYS of statement after it. Outcomes are made later by scorecard.py
-    last = tx.groupby("vendor_id").completion_time.max()
-    gap = (ap_.vendor_id.map(last) - pd.to_datetime(ap_.application_date)).dt.days
+    # measured to the designed end of each statement (start_date + statement_days - 1). A vendor with no activity in its last few
+    # days has an earlier LAST TRANSACTION, but the statement period still covers the window.
+    end = pd.to_datetime(ve.set_index("vendor_id").start_date) + pd.to_timedelta(ve.set_index("vendor_id").statement_days - 1, unit="D")
+    gap = (ap_.vendor_id.map(end) - pd.to_datetime(ap_.application_date)).dt.days
     flag((gap >= 90).all(), f"every application has at least 90 days of statement after it (shortest {gap.min()} days)")
+    quiet = ((ap_.vendor_id.map(tx.groupby("vendor_id").completion_time.max()) - pd.to_datetime(ap_.application_date)).dt.days < 90).sum()
+    if quiet:
+        print(f"      {quiet} application(s) have a last transaction less than 90 days after it (vendor quiet at the end; fine)")
     flag(abs(ap_.hidden_shock.mean()) < 0.35 and 0.7 < ap_.hidden_shock.std() < 1.3,
          f"hidden_shock looks standard normal (mean {ap_.hidden_shock.mean():.2f}, sd {ap_.hidden_shock.std():.2f})")
     flag(not {"defaulted", "late_or_default", "days_past_due"} & set(ap_.columns), "no outcome columns yet (made by scorecard.py)")
