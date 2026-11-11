@@ -18,6 +18,22 @@ def load(d, name):
     raise SystemExit(f"{name} not found in {d}")
 
 
+def load_transactions(d, groups):
+    """Large files are written in chunks of 50 vendors. Read only the first `groups` chunks (0 = all)."""
+    p = os.path.join(d, "transactions.parquet")
+    if os.path.exists(p):
+        try:
+            import pyarrow.parquet as pq
+            pf = pq.ParquetFile(p)
+            n = pf.num_row_groups
+            if groups and n > groups:
+                return pf.read_row_groups(list(range(groups))).to_pandas(), n
+            return pf.read().to_pandas(), n
+        except ImportError:
+            pass
+    return load(d, "transactions"), 1
+
+
 def flag(ok, text):
     print(("PASS  " if ok else "FAIL  ") + text)
     return ok
@@ -26,11 +42,19 @@ def flag(ok, text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="data/synthetic")
+    ap.add_argument("--groups", type=int, default=6,
+                    help="check the first N chunks of 50 vendors (default 6 = 300 vendors, 0 = everything). "
+                         "The full file is also checked row by row by src/clean.py")
     a = ap.parse_args()
-    tx, ve, ap_ = load(a.dir, "transactions"), load(a.dir, "vendors"), load(a.dir, "loan_applications")
+    tx, n_groups = load_transactions(a.dir, a.groups)
+    ve, ap_ = load(a.dir, "vendors"), load(a.dir, "loan_applications")
     tx["completion_time"] = pd.to_datetime(tx["completion_time"])
     tx = tx.sort_values(["vendor_id", "completion_time"], kind="stable")
-    print(f"{len(tx):,} lines, {tx.vendor_id.nunique()} vendors, {len(ap_)} applications\n")
+    n_all_vendors, n_all_apps = len(ve), len(ap_)
+    seen = tx.vendor_id.unique()
+    ve, ap_ = ve[ve.vendor_id.isin(seen)], ap_[ap_.vendor_id.isin(seen)]
+    note = f" (checked the first {len(seen)} of {n_all_vendors} vendors)" if len(seen) < n_all_vendors else ""
+    print(f"{len(tx):,} lines, {tx.vendor_id.nunique()} vendors, {n_all_apps} applications{note}\n")
 
     print("-- Data dictionary rules")
     flag(((tx.paid_in > 0) & (tx.withdrawn > 0)).sum() == 0, "each row has paid_in or withdrawn, not both")
@@ -44,9 +68,13 @@ def main():
     flag((tx[["paid_in", "withdrawn", "balance"]] >= 0).all().all(), "paid_in, withdrawn and balance never negative")
     draws = tx[tx.txn_type_true == "FULIZA_DRAW"].paid_in
     flag((draws <= 1000).all() and (draws >= 50).all(), f"Fuliza draws between 50 and 1,000 (median {draws.median():.0f}, mean {draws.mean():.0f})")
-    rate = ap_.defaulted.mean()
-    flag(0.14 <= rate <= 0.19, f"overall defaulted rate {rate:.1%} (target 14% to 19%, anchor 16.6%)")
-    print(f"      late_or_default rate {ap_.late_or_default.mean():.1%} (stress run should be near 61%)")
+    # outcome window: every application must have OBS_WINDOW_DAYS of statement after it. Outcomes are made later by scorecard.py
+    last = tx.groupby("vendor_id").completion_time.max()
+    gap = (ap_.vendor_id.map(last) - pd.to_datetime(ap_.application_date)).dt.days
+    flag((gap >= 90).all(), f"every application has at least 90 days of statement after it (shortest {gap.min()} days)")
+    flag(abs(ap_.hidden_shock.mean()) < 0.35 and 0.7 < ap_.hidden_shock.std() < 1.3,
+         f"hidden_shock looks standard normal (mean {ap_.hidden_shock.mean():.2f}, sd {ap_.hidden_shock.std():.2f})")
+    flag(not {"defaulted", "late_or_default", "days_past_due"} & set(ap_.columns), "no outcome columns yet (made by scorecard.py)")
     print(f"      failed rows {(tx.transaction_status == 'Failed').sum()}, reversals {(tx.txn_type_true == 'REVERSAL').sum()}")
 
     print("\n-- Per persona")
@@ -61,7 +89,7 @@ def main():
     ticket = ins.groupby("vendor_id").paid_in.median()
     till = (ins.txn_type_true == "TILL_PAYMENT_IN").groupby(ins.vendor_id).mean()
     fz = tx[tx.txn_type_true == "FULIZA_DRAW"].groupby("vendor_id").size().reindex(ve.vendor_id).fillna(0)
-    months = ve.set_index("vendor_id").months_of_history
+    months = ve.set_index("vendor_id").statement_days / 30.0
     fz_pm = fz / months.reindex(fz.index)
     lastinf = ins.groupby(["vendor_id", "month"]).paid_in.sum()
     vs = pd.DataFrame({"persona": ve.set_index("vendor_id").persona, "tx_per_active_day": per_day, "active_days_pm": act,
@@ -69,12 +97,8 @@ def main():
     order = ["stable", "growing", "seasonal", "new", "struggling"]
     print(vs.groupby("persona").median(numeric_only=True).reindex(order).round(2).to_string())
     pa = ap_.merge(ve[["vendor_id", "persona"]], on="vendor_id")
-    print("\ndefault rate by persona:")
-    print(pa.groupby("persona").defaulted.mean().reindex(order).round(3).to_string())
-    r = pa.groupby("persona").defaulted.mean()
-    flag(r.idxmax() == "struggling" and (r["stable"] + r["growing"]) / 2 < (r["seasonal"] + r["new"]) / 2 < r["struggling"],
-         "default rate: struggling highest, stable and growing below seasonal and new (exceptions allowed, small samples)")
-    print(f"      applications per persona: {pa.persona.value_counts().reindex(order).to_dict()}")
+    print(f"\napplications per persona: {pa.persona.value_counts().reindex(order).to_dict()}")
+    print("default and late rates by persona are in docs/scorecard_report.md (after scorecard.py)")
 
     # Fuliza repayment speed: days from a draw to the next repayment line
     lags = []

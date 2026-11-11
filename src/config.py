@@ -7,7 +7,8 @@ Amounts are in KES.
 
 # ---------------------------------------------------------------- run settings
 SEED = 42
-N_VENDORS = 300                  # full run. Use --n-vendors 50 for a quick check
+N_VENDORS = 1000                 # full run. Use --n-vendors 50 for a quick check
+CHUNK_VENDORS = 50               # vendors written per chunk (one parquet row group). Keeps memory small
 END_DATE = "2026-06-30"          # every statement ends on this date
 OUT_DIR = "data/synthetic"
 PERSONA_OVERLAP = 0.10           # share of parameters a vendor takes from an adjacent persona (personas.md)
@@ -58,10 +59,15 @@ BUSINESS_TYPES = ["fresh_produce", "food_stall", "retail_kiosk", "services", "se
 TICKET_MULTIPLIER = {  # personas.md: business type can shift the ticket size (assumption)
     "fresh_produce": 0.8, "food_stall": 0.9, "retail_kiosk": 1.0, "services": 1.4, "second_hand_clothes": 1.2}
 
-# Latent risk nudges behaviour only partly (personas.md: features reflect risk partly)
-RISK_INFLOW_EFFECT = 0.25        # inflow scale falls by up to this share as latent_risk rises
-RISK_FULIZA_EFFECT = 0.60        # added to fuliza_prop per unit of latent_risk
-RISK_BILL_MISS_EFFECT = 0.40     # added to bill_miss per unit of latent_risk
+# Latent risk shapes behaviour, but only partly (personas.md: features reflect risk partly).
+# z is the vendor's position inside its own persona's risk range: -1 at the low end, +1 at the high end.
+# So within a persona, riskier vendors look somewhat worse. Persona differences still dominate. All are assumptions.
+# Before v0.5 these effects were tied to the raw risk value and came to only about 1 to 2% within a persona.
+RISK_INFLOW_EFFECT = 0.30        # inflow volume falls by this share at z = +1 (and rises at z = -1)
+RISK_FULIZA_EFFECT = 0.25        # added to fuliza_prop per unit of z
+RISK_BILL_MISS_EFFECT = 0.20     # added to bill_miss per unit of z
+RISK_CV_EFFECT = 0.30            # weekly income variation rises by this share at z = +1
+RISK_TREND_EFFECT = 0.015        # monthly income growth rate falls by this much per unit of z
 
 # ---------------------------------------------------------------- transactions
 TICKET_SIGMA = 0.8               # log-normal spread of sale sizes around the vendor's median (assumption)
@@ -103,11 +109,61 @@ LOAN_MIN, LOAN_MAX = 500, 10000
 TERM_RANGE = (7, 30)
 APPLICATION_MIN_DAY = 25               # earliest application day after the vendor's first transaction
 APPLICATION_FRACTION = (0.55, 0.90)    # application falls this far through the statement
-SHOCK_SD = 0.10                        # default probability = latent_risk + N(0, SHOCK_SD), clipped to 0..1
-TARGET_DEFAULT_RATE = 0.166            # row 10a (checked after the run)
-# Probability a non-defaulting borrower is late: LATE_BASE + LATE_SLOPE * latent_risk.
-# Base run: small. Stress run (--stress): raised until late_or_default is near 61% (row 10b).
-LATE_BASE, LATE_SLOPE = 0.15, 1.0
-STRESS_LATE_BASE, STRESS_LATE_SLOPE = 0.37, 1.0
-LATE_DAYS = (1, 30)
-DEFAULT_DAYS_PAST_DUE = (31, 120)
+# ---------------------------------------------------------------- outcomes (v0.6)
+# 1. `defaulted` comes from the cash-flow scorecard (src/scorecard.py): a probability p per application, then a coin flip.
+# 2. Fuliza lateness is READ from the transactions after the application date (src/outcomes.py).
+# 3. repayment_status combines them: 2 default, 1 late (not defaulted, but a Fuliza draw stayed unpaid past
+#    LATE_THRESHOLD_DAYS), 0 on time.
+TARGET_DEFAULT_RATE = 0.166            # row 10a (FinAccess 2024). The scorecard intercept is set so the average p matches it
+OBS_WINDOW_DAYS = 90                   # statements run this many days past the last possible application date
+FULIZA_COUNT_DAYS = 60                 # only Fuliza draws in the first 60 days count, so each has 30 days to be repaid
+LATE_THRESHOLD_DAYS = 30               # a draw unpaid after 30 days is late (Fuliza term; IFRS 9 30-day presumption)
+# Hidden shock: one standard-normal draw per application (illness, market closing). It lowers the vendor's inflows after
+# the application date and also raises default risk in the scorecard, so the two outcomes share a hidden cause.
+SHOCK_INFLOW_EFFECT = 0.25             # inflows are multiplied by exp(-effect * shock), clipped to SHOCK_CLIP (assumption)
+SHOCK_CLIP = (0.4, 1.5)
+
+# ---------------------------------------------------------------- scorecard (docs/scorecard_mapping.md)
+# Pillar -> {feature: direction}. +1 means a higher value raises risk, -1 lowers it. Directions are author assumptions
+# supported by cash-flow underwriting practice; see docs/scorecard_mapping.md for the reasoning.
+SCORECARD_PILLARS = {
+    "A_income_stability": {
+        "weekly_income_cv_90": +1, "income_active_day_share_90": -1, "repeat_sender_share_90": -1,
+        "income_count_90": -1, "median_ticket_90": -1},
+    "B_cash_flow_buffer": {
+        "near_zero_day_share_90": +1, "balance_median_eod_90": -1, "balance_min_eod_90": -1,
+        "net_cash_flow_ratio_90": -1, "balance_trend_90": -1, "balance_cv_90": +1,
+        "withdraw_share_of_income_90": +1, "fee_share_of_income_90": +1},
+    # cash_deposit_share_90 is deliberately NOT in the scorecard: its direction is ambiguous and unsupported (own capital added,
+    # or weak mobile-money sales). It stays a model input.
+    "C_borrowing_distress": {
+        "fuliza_draws_90": +1, "fuliza_funded_share_90": +1, "fuliza_repay_lag_median_days_90": +1,
+        "days_since_last_fuliza_draw": -1, "failed_payment_share_90": +1, "fuliza_amount_90": +1,
+        "reversal_count_90": +1},
+    "D_affordability": {
+        "amount_to_avg_monthly_income_90": +1, "amount_to_income_30": +1, "debt_service_ratio_90": +1,
+        "requested_term_days": +1},
+    "E_obligations": {
+        "paybill_months_paid_90": -1, "supplier_spend_share_90": -1, "supplier_count_90": -1,
+        "essential_outflow_share_90": -1, "free_cash_flow_ratio_90": -1},
+    "F_history_growth": {
+        "history_days": -1, "income_trend_30_vs_prior": -1, "fuliza_draws_30": +1},
+    "G_network": {"unique_senders_90": -1, "till_share_90": -1},
+}
+# Pillar weights (sum to 1). "author" is the main set (docs/scorecard_mapping.md section 1). All are assumptions.
+WEIGHT_SETS = {
+    "author":         {"A_income_stability": 0.30, "B_cash_flow_buffer": 0.25, "C_borrowing_distress": 0.15,
+                       "D_affordability": 0.10, "E_obligations": 0.10, "F_history_growth": 0.05, "G_network": 0.05},
+    "equal":          {k: 1 / 7 for k in ("A_income_stability", "B_cash_flow_buffer", "C_borrowing_distress",
+                                          "D_affordability", "E_obligations", "F_history_growth", "G_network")},
+    "cashflow_heavy": {"A_income_stability": 0.35, "B_cash_flow_buffer": 0.30, "C_borrowing_distress": 0.15,
+                       "D_affordability": 0.05, "E_obligations": 0.05, "F_history_growth": 0.05, "G_network": 0.05},
+    "fico_like":      {"A_income_stability": 0.10, "B_cash_flow_buffer": 0.10, "C_borrowing_distress": 0.20,
+                       "D_affordability": 0.25, "E_obligations": 0.20, "F_history_growth": 0.10, "G_network": 0.05},
+}
+MAIN_WEIGHTS = "author"
+SCORECARD_SCALE = 1.2                  # logit units per unit of the pillar-weighted score (assumption)
+HIDDEN_RISK_COEF = 0.5                 # logit units per standard deviation of latent_risk (assumption)
+SHOCK_COEF = 0.5                       # logit units per unit of hidden shock (assumption)
+SHOCK_COEF_LEVELS = (0.25, 0.5, 0.9)   # sensitivity run
+SCORE_CLIP = 3.0                       # feature z-scores are clipped to +/- this before scoring

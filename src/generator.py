@@ -3,7 +3,6 @@
 Run from the repo root:
     python src/generator.py                      # full run, settings from src/config.py
     python src/generator.py --n-vendors 50 --max-months 6     # quick check
-    python src/generator.py --stress             # raise lateness so late_or_default is near 61%
 
 Writes three tables to data/synthetic/ (parquet if pyarrow is installed, otherwise csv):
     transactions, vendors, loan_applications     (columns: docs/data_dictionary.md, sections 1 to 3)
@@ -14,8 +13,12 @@ How it works, in short:
   2. The vendor's statement is simulated day by day: sales come in (till or send money), the vendor pays
      suppliers and bills, sends and withdraws money, and Fuliza covers shortfalls. Fuliza is repaid
      automatically from the next money that arrives, as in a real statement.
-  3. Loan applications are created at random dates inside the statement. The label comes from
-     latent_risk plus a random shock, never directly from the transactions.
+  3. Loan applications are created at random dates inside the vendor's history. Each statement then runs
+     OBS_WINDOW_DAYS (90) days further, so the repayment behaviour after every application is on the statement.
+     Each application also gets a hidden shock that lowers the vendor's inflows after the application date.
+  4. No outcome is written here. The scorecard (src/scorecard.py) sets `defaulted` from the features, and
+     src/outcomes.py reads Fuliza lateness from the transactions after the application date.
+     The vendor's position inside its persona's risk range also shifts its behaviour (config.py, RISK_*_EFFECT).
 """
 import argparse
 import hashlib
@@ -60,11 +63,13 @@ def make_vendor(rng, idx, max_months):
         v[key] = rng.uniform(lo, hi)
     lo, hi = own["latent_risk"]
     v["latent_risk"] = rng.uniform(lo, hi)
-    mid = (lo + hi) / 2
-    dev = v["latent_risk"] - mid                       # position inside the persona's risk range
-    v["inflow_scale"] = 1 - C.RISK_INFLOW_EFFECT * dev
-    v["fuliza_prop"] = float(np.clip(v["fuliza_prop"] + C.RISK_FULIZA_EFFECT * dev, 0, 1))
-    v["bill_miss"] = float(np.clip(v["bill_miss"] + C.RISK_BILL_MISS_EFFECT * dev, 0, 1))
+    mid, half = (lo + hi) / 2, (hi - lo) / 2
+    z = (v["latent_risk"] - mid) / half                # -1 to +1: position inside the persona's own risk range
+    v["inflow_scale"] = 1 - C.RISK_INFLOW_EFFECT * z
+    v["fuliza_prop"] = float(np.clip(v["fuliza_prop"] + C.RISK_FULIZA_EFFECT * z, 0, 1))
+    v["bill_miss"] = float(np.clip(v["bill_miss"] + C.RISK_BILL_MISS_EFFECT * z, 0, 1))
+    v["weekly_cv"] = float(v["weekly_cv"] * (1 + C.RISK_CV_EFFECT * z))
+    v["trend"] = float(v["trend"] - C.RISK_TREND_EFFECT * z)
     months = int(rng.integers(own["months"][0], own["months"][1] + 1))
     if max_months:
         months = min(months, max_months)
@@ -92,9 +97,9 @@ def season(v, month):
 
 
 # ------------------------------------------------------------------ one vendor's statement
-def simulate_vendor(rng, v, end_date, out):
-    """Append this vendor's statement lines to `out` (a list of tuples)."""
-    n_days = v["history_days"]
+def simulate_vendor(rng, v, end_date, out, n_days, shocks):
+    """Append this vendor's statement lines to `out` (a list of tuples).
+    n_days: statement length (history plus the outcome window). shocks: [(application day, shock)], sorted by day."""
     start = end_date - dt.timedelta(days=n_days - 1)
     vid = v["vendor_id"]
     hours = np.array(C.HOUR_WEIGHTS, dtype=float)
@@ -174,14 +179,18 @@ def simulate_vendor(rng, v, end_date, out):
         s = season(v, date.month)
         trend = (1 + v["trend"]) ** (d / 30.0)
         wd = date.weekday()
-        p_active = float(np.clip(v["active_days"] / 30.0 * math.sqrt(s), 0.05, 0.97))
+        shock_mult = 1.0                           # a shock hits inflows for OBS_WINDOW_DAYS after its application
+        for a_day, a_shock in shocks:
+            if a_day <= d < a_day + C.OBS_WINDOW_DAYS:
+                shock_mult = float(np.clip(math.exp(-C.SHOCK_INFLOW_EFFECT * a_shock), *C.SHOCK_CLIP))
+        p_active = float(np.clip(v["active_days"] / 30.0 * math.sqrt(s) * math.sqrt(shock_mult), 0.05, 0.97))
         active = rng.random() < p_active
         events = []                                # (second of day, kind, amount, cp, details...)
 
         inflow_total = 0
         if active:
             lam = (v["tx_per_day"] * math.sqrt(s) * trend * week_factor * C.WEEKDAY_FACTOR[wd]
-                   * v["inflow_scale"])
+                   * v["inflow_scale"] * shock_mult)
             n = int(rng.poisson(max(lam, 0.0)))
             if n:
                 tickets = rng.lognormal(math.log(max(v["ticket"], 20)), C.TICKET_SIGMA, n)
@@ -267,7 +276,9 @@ def simulate_vendor(rng, v, end_date, out):
 
 
 # ------------------------------------------------------------------ loans
-def make_applications(rng, v, start, app_counter, stress):
+def make_applications(rng, v, start, app_counter):
+    """Application dates, amounts, terms and the hidden shock. Outcomes are made later (src/scorecard.py, src/outcomes.py).
+    Dates fall inside the vendor's history, so every application has at least OBS_WINDOW_DAYS of statement after it."""
     n_days = v["history_days"]
     lo_day = min(C.APPLICATION_MIN_DAY, n_days - 1)
     k = 1 if v["persona"] == "new" else int(rng.integers(1, 5))
@@ -280,32 +291,23 @@ def make_applications(rng, v, start, app_counter, stress):
         if all(abs(d - x) >= 45 for x in days):
             days.append(d)
     apps = []
-    late_base, late_slope = (C.STRESS_LATE_BASE, C.STRESS_LATE_SLOPE) if stress else (C.LATE_BASE, C.LATE_SLOPE)
     for d in sorted(days):
         app_counter[0] += 1
         amount = float(np.clip(rng.lognormal(math.log(C.LOAN_MEDIAN), C.LOAN_SIGMA), C.LOAN_MIN, C.LOAN_MAX))
         amount = round(amount / 100) * 100
-        p_default = float(np.clip(v["latent_risk"] + rng.normal(0, C.SHOCK_SD), 0, 1))
-        defaulted = int(rng.random() < p_default)
-        if defaulted:
-            dpd = int(rng.integers(C.DEFAULT_DAYS_PAST_DUE[0], C.DEFAULT_DAYS_PAST_DUE[1] + 1))
-        elif rng.random() < float(np.clip(late_base + late_slope * v["latent_risk"], 0, 1)):
-            dpd = int(rng.integers(C.LATE_DAYS[0], C.LATE_DAYS[1] + 1))
-        else:
-            dpd = 0
         apps.append({
             "application_id": f"A{app_counter[0]:06d}", "vendor_id": v["vendor_id"],
             "application_date": (start + dt.timedelta(days=d)).date().isoformat(),
             "requested_amount": amount, "requested_term_days": int(rng.integers(C.TERM_RANGE[0], C.TERM_RANGE[1] + 1)),
-            "defaulted": defaulted, "days_past_due": dpd, "late_or_default": int(defaulted == 1 or dpd >= 1)})
+            "hidden_shock": round(float(rng.normal()), 4)})
     return apps
 
 
 # ------------------------------------------------------------------ receipts
-def receipt_numbers(n):
-    """Unique 10-character base-36 codes that look like M-Pesa receipts."""
+def receipt_numbers(n, offset=0):
+    """Unique 10-character base-36 codes that look like M-Pesa receipts. `offset` keeps them unique across chunks."""
     mod = 36 ** 10
-    x = (np.arange(n, dtype=np.uint64) * np.uint64(2147483647) + np.uint64(987654321987)) % np.uint64(mod)
+    x = (np.arange(offset, offset + n, dtype=np.uint64) * np.uint64(2147483647) + np.uint64(987654321987)) % np.uint64(mod)
     chars = np.array(list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
     digits = []
     for _ in range(10):
@@ -324,12 +326,60 @@ def save(df, out_dir, name):
         return path + ".csv"
 
 
+TX_COLUMNS = ["receipt_no", "completion_time", "details", "transaction_status", "paid_in", "withdrawn", "balance",
+              "vendor_id", "counterparty_id", "txn_type_true"]
+
+
+def to_frame(rows, offset):
+    """Turn a list of raw statement lines (whole vendors only) into the transactions table."""
+    tx = pd.DataFrame(rows, columns=["t", "details", "transaction_status", "paid_in", "withdrawn", "balance",
+                                     "vendor_id", "counterparty_id", "txn_type_true"])
+    tx["completion_time"] = pd.to_datetime(tx.pop("t"), unit="s")
+    tx = tx.sort_values(["vendor_id", "completion_time"], kind="stable").reset_index(drop=True)
+    tx.insert(0, "receipt_no", receipt_numbers(len(tx), offset))
+    for c in ("paid_in", "withdrawn", "balance"):
+        tx[c] = tx[c].astype(float)
+    return tx[TX_COLUMNS]
+
+
+class TxWriter:
+    """Writes the transactions table in chunks of whole vendors, one parquet row group per chunk, so memory stays small.
+    Downstream stages (clean.py, features.py) read one row group at a time. Falls back to one csv if pyarrow is missing."""
+
+    def __init__(self, out_dir):
+        self.out_dir, self.n, self.frames, self.writer = out_dir, 0, [], None
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            self.pa, self.pq = pa, pq
+        except ImportError:
+            self.pa = self.pq = None
+
+    def add(self, rows):
+        if not rows:
+            return
+        df = to_frame(rows, self.n)
+        self.n += len(df)
+        if self.pq is None:
+            self.frames.append(df)
+            return
+        table = self.pa.Table.from_pandas(df, preserve_index=False)
+        if self.writer is None:
+            self.writer = self.pq.ParquetWriter(os.path.join(self.out_dir, "transactions.parquet"), table.schema)
+        self.writer.write_table(table, row_group_size=max(len(table), 1))
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.close()
+            return os.path.join(self.out_dir, "transactions.parquet")
+        return save(pd.concat(self.frames, ignore_index=True), self.out_dir, "transactions")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-vendors", type=int, default=C.N_VENDORS)
     ap.add_argument("--seed", type=int, default=C.SEED)
     ap.add_argument("--max-months", type=int, default=0, help="cap statement length (for quick checks)")
-    ap.add_argument("--stress", action="store_true", help="late_or_default near 61%% (stress scenario)")
     ap.add_argument("--out-dir", default=C.OUT_DIR)
     a = ap.parse_args()
 
@@ -337,29 +387,28 @@ def main():
     end_date = dt.datetime.strptime(C.END_DATE, "%Y-%m-%d")
     os.makedirs(a.out_dir, exist_ok=True)
     rows, vendors, apps, counter = [], [], [], [0]
+    writer = TxWriter(a.out_dir)
     for i in range(1, a.n_vendors + 1):
         v = make_vendor(rng, i, a.max_months)
-        start = simulate_vendor(rng, v, end_date, rows)
-        apps.extend(make_applications(rng, v, start, counter, a.stress))
+        total_days = v["history_days"] + C.OBS_WINDOW_DAYS        # history, then the outcome window
+        start = end_date - dt.timedelta(days=total_days - 1)
+        vapps = make_applications(rng, v, start, counter)
+        shocks = sorted(((dt.date.fromisoformat(x["application_date"]) - start.date()).days, x["hidden_shock"]) for x in vapps)
+        simulate_vendor(rng, v, end_date, rows, total_days, shocks)
+        apps.extend(vapps)
         vendors.append({"vendor_id": v["vendor_id"], "business_type": v["business_type"], "gender": v["gender"],
                         "start_date": start.date().isoformat(), "months_of_history": v["months_of_history"],
-                        "persona": v["persona"], "latent_risk": round(v["latent_risk"], 4)})
-        if i % 50 == 0:
-            print(f"  {i}/{a.n_vendors} vendors, {len(rows):,} lines", flush=True)
+                        "statement_days": total_days, "persona": v["persona"], "latent_risk": round(v["latent_risk"], 4)})
+        if i % C.CHUNK_VENDORS == 0 or i == a.n_vendors:      # write whole vendors only, then free the memory
+            writer.add(rows)
+            rows.clear()
+            print(f"  {i}/{a.n_vendors} vendors, {writer.n:,} lines", flush=True)
 
-    tx = pd.DataFrame(rows, columns=["t", "details", "transaction_status", "paid_in", "withdrawn", "balance",
-                                     "vendor_id", "counterparty_id", "txn_type_true"])
-    tx["completion_time"] = pd.to_datetime(tx.pop("t"), unit="s")
-    tx = tx.sort_values(["vendor_id", "completion_time"], kind="stable").reset_index(drop=True)
-    tx.insert(0, "receipt_no", receipt_numbers(len(tx)))
-    for c in ("paid_in", "withdrawn", "balance"):
-        tx[c] = tx[c].astype(float)
-    tx = tx[["receipt_no", "completion_time", "details", "transaction_status", "paid_in", "withdrawn", "balance",
-             "vendor_id", "counterparty_id", "txn_type_true"]]
-    p1 = save(tx, a.out_dir, "transactions")
+    p1 = writer.close()
     p2 = save(pd.DataFrame(vendors), a.out_dir, "vendors")
     p3 = save(pd.DataFrame(apps), a.out_dir, "loan_applications")
-    print(f"wrote {len(tx):,} transaction lines, {len(vendors)} vendors, {len(apps)} applications")
+    print(f"wrote {writer.n:,} transaction lines, {len(vendors)} vendors, {len(apps)} applications")
+    print("outcomes are made later: python src/scorecard.py (after clean.py and features.py)")
     print(" ", p1, p2, p3, sep="\n  ")
 
 
