@@ -1,13 +1,4 @@
-"""Stage 4c: the three-class outcome (0 on time, 1 late, 2 default). Secondary target.
-
-Run from the repo root, after scorecard.py:
-    python src/train_multiclass.py               python src/train_multiclass.py --quick
-
-Same vendor split as train_models.py (70/15/15 by vendor, balanced by persona). Fixed, modest model settings (no grid), because the
-late class is small. Reports, on the test vendors: one-vs-rest AUC per class and macro average, accuracy, balanced accuracy,
-macro F1, the confusion matrix and recall per class. Baseline: always predicting the most common class.
-Class 1 (late) is read from Fuliza repayment after the application date, class 2 (default) comes from the scorecard.
-"""
+"""Train and evaluate models on the three-class outcome (on time, late, default)."""
 import argparse
 import json
 import os

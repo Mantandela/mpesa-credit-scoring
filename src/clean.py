@@ -1,31 +1,11 @@
-"""Stage 2: cleaning (docs/data_dictionary.md, "Transaction type taxonomy" and "Validation rules").
-
-Reads data/synthetic/transactions, works out `txn_type` from the `details` text only (never from txn_type_true),
-flags rows that break the validation rules, and writes data/interim/transactions_clean.
-
-Run from the repo root:
-    python src/clean.py                              clean data/synthetic
-    python src/clean.py --dir data/test              clean another folder
-    python src/clean.py --statement data/private/statement.xlsx
-                                                     clean a REAL statement. Reads the Excel file, finds the header,
-                                                     writes data/private/statement_clean.parquet and
-                                                     data/private/cleaning_report_statement.md (git-ignored)
-    python src/clean.py --wording my_details.txt     classify detail strings from a text file (one per line)
-                                                     and print counts only. For checking real statement wording locally.
-
-The cleaner does NOT delete rows. It adds columns, so later stages choose what to drop:
-    txn_type, direction, is_failed, fuliza_funded and one flag_* column per rule.
-txn_type_true is kept only so accuracy can be checked. It must never be a model input.
-"""
+"""Classify M-Pesa transaction types from the details text and flag rows that break the validation rules."""
 import argparse
 import os
 import re
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------- classification rules
-# Applied to details after lower-casing and removing spaces, ids and digits. First match wins.
-# The wording follows the generator and the author's own statement (data_dictionary.md section 1).
+# Applied to normalised details (lower-case, no spaces, ids or digits). First match wins.
 RULES = [
     ("REVERSAL",      r"^reversal"),
     ("FULIZA_DRAW",   r"^overdraft(?!charge)|overdraftofcreditparty|fuliza(draw|disburse)"),
@@ -45,7 +25,7 @@ INFLOW_TYPES = {"TILL_PAYMENT_IN", "SEND_MONEY_IN", "DEPOSIT_AGENT", "FULIZA_DRA
 
 
 def normalise(s: pd.Series) -> pd.Series:
-    """lower-case, drop failed prefix marker later, hashed ids, digits and spaces so only wording is left"""
+    """Lower-case and strip hashed ids, digits and spaces so only the wording is left."""
     s = s.fillna("").astype(str).str.lower()
     s = s.str.replace(r"cp_[0-9a-f]+", "cp", regex=True)
     s = s.str.replace(r"\s+", "", regex=True).str.replace(r"\d+", "", regex=True)
@@ -62,7 +42,7 @@ def classify_one(norm: str) -> str:
 
 
 def classify_details(details: pd.Series) -> pd.DataFrame:
-    """Returns txn_type, is_failed and fuliza_funded for a Series of details strings. Works on unique wordings only."""
+    """Return txn_type, is_failed and fuliza_funded per row, classifying each unique wording once."""
     norm = normalise(details)
     codes, uniques = pd.factorize(norm)
     mapped = np.array([classify_one(u) for u in uniques], dtype=object)
@@ -74,7 +54,6 @@ def classify_details(details: pd.Series) -> pd.DataFrame:
     return out
 
 
-# ---------------------------------------------------------------- loading and saving
 def load(d, name):
     for ext, fn in ((".parquet", pd.read_parquet), (".csv", pd.read_csv)):
         p = os.path.join(d, name + ext)
@@ -84,10 +63,7 @@ def load(d, name):
 
 
 def read_real_statement(path) -> pd.DataFrame:
-    """Reads a real M-Pesa statement (xlsx, xls or csv) into the same columns as the synthetic transactions table.
-    Finds the header row (the line with Receipt and Details), maps the column names, strips commas from numbers
-    and puts the rows oldest first (real statements are usually newest first, which would scramble rows that
-    share a second). All rows get vendor_id REAL_STATEMENT."""
+    """Read a real M-Pesa statement (xlsx, xls or csv) into the synthetic transactions schema, oldest first."""
     if path.lower().endswith((".xlsx", ".xls")):
         raw = pd.read_excel(path, header=None, dtype=str)
     else:
@@ -141,18 +117,17 @@ def save(df, folder, name):
     return p
 
 
-# ---------------------------------------------------------------- cleaning
 def clean(tx: pd.DataFrame, as_of=None) -> pd.DataFrame:
     tx = tx.copy()
     tx["completion_time"] = pd.to_datetime(tx["completion_time"])
     tx["_orig_order"] = np.arange(len(tx))
-    # Real statements are often newest first. Sort oldest first inside each vendor, keeping file order for ties.
+    # Sort oldest first per vendor; keep file order for ties
     tx = tx.sort_values(["vendor_id", "completion_time", "_orig_order"], kind="stable").reset_index(drop=True)
 
     tx = tx.join(classify_details(tx["details"]))
     tx["direction"] = np.where(tx.is_failed, "none", np.where(tx.paid_in > 0, "in", np.where(tx.withdrawn > 0, "out", "none")))
 
-    # Wording the rules do not know: still keep the row, tag the direction so counts stay honest.
+    # Unknown wording: keep the row, tagged by direction
     unk = tx.txn_type == "UNKNOWN"
     tx.loc[unk & (tx.direction == "in"), "txn_type"] = "OTHER_IN"
     tx.loc[unk & (tx.direction == "out"), "txn_type"] = "OTHER_OUT"
@@ -176,7 +151,7 @@ FLAGS = ["flag_both_amounts", "flag_balance_break", "flag_duplicate_receipt", "f
 
 
 def collect_stats(tx: pd.DataFrame) -> dict:
-    """Counts only. Can be added together across chunks, so the report never needs the whole table in memory."""
+    """Counts only, so stats from separate chunks can be merged."""
     s = {"n": len(tx), "vendors": int(tx.vendor_id.nunique()),
          "types": tx.txn_type.value_counts().to_dict(),
          "flags": {f: int(tx[f].sum()) for f in FLAGS},
@@ -230,8 +205,7 @@ def report(tx: pd.DataFrame) -> str:
 
 
 def clean_file_in_chunks(path: str, out_dir: str, as_of=None):
-    """Clean a parquet file written in chunks of whole vendors (the generator does this), one row group at a time.
-    Returns (stats, output path). Memory stays at one chunk. receipt_no is also checked for duplicates across chunks."""
+    """Clean a chunked parquet file one row group at a time. Returns (stats, output path)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
     pf = pq.ParquetFile(path)
@@ -279,7 +253,7 @@ def main():
         return
 
     if a.statement:
-        # real data: keep every output inside the git-ignored private folder
+        # Real data: keep every output inside the git-ignored private folder
         a.out = "data/private"
         a.report = "data/private/cleaning_report_statement.md"
         tx = clean(read_real_statement(a.statement), a.as_of)
@@ -294,7 +268,7 @@ def main():
                 chunked = pq.ParquetFile(src).num_row_groups > 1
             except ImportError:
                 pass
-        if chunked:                                   # large file written in chunks: one chunk in memory at a time
+        if chunked:
             stats, p = clean_file_in_chunks(src, a.out, a.as_of)
             txt = report_from_stats(stats)
         else:

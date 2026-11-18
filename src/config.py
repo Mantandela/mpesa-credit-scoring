@@ -1,11 +1,6 @@
-"""All parameters for the synthetic M-Pesa vendor data generator.
+"""Parameters for the synthetic M-Pesa vendor data generator and scorecard (sources in docs/assumptions.md)."""
 
-Every number here comes from `docs/assumptions.md` (row numbers in the comments) or `docs/personas.md`.
-Values marked "assumption" have no published source. Change them here and nowhere else.
-Amounts are in KES.
-"""
-
-# ---------------------------------------------------------------- run settings
+# Run settings
 SEED = 42
 N_VENDORS = 1000                 # full run. Use --n-vendors 50 for a quick check
 CHUNK_VENDORS = 50               # vendors written per chunk (one parquet row group). Keeps memory small
@@ -13,9 +8,8 @@ END_DATE = "2026-06-30"          # every statement ends on this date
 OUT_DIR = "data/synthetic"
 PERSONA_OVERLAP = 0.10           # share of parameters a vendor takes from an adjacent persona (personas.md)
 
-# ---------------------------------------------------------------- personas (personas.md v0.2)
-# (low, high) ranges. Each vendor draws its own value inside the range.
-# till_share: share of inflows that are till payments (rest is send money). Assumptions.md row 3 / O4.
+# Personas (personas.md): (low, high) ranges; each vendor draws its own value inside the range.
+# till_share: share of inflows that are till payments (rest is send money).
 # fuliza_prop: chance that a payment the balance cannot cover is funded by Fuliza (assumption).
 # sweep_prob: chance per active day that the vendor withdraws cash at an agent (assumption).
 # supplier_prob: chance per week of a supplier (buy goods) payment (assumption).
@@ -56,20 +50,17 @@ ADJACENT = {
 }
 
 BUSINESS_TYPES = ["fresh_produce", "food_stall", "retail_kiosk", "services", "second_hand_clothes"]
-TICKET_MULTIPLIER = {  # personas.md: business type can shift the ticket size (assumption)
+TICKET_MULTIPLIER = {  # business type shifts ticket size (assumption)
     "fresh_produce": 0.8, "food_stall": 0.9, "retail_kiosk": 1.0, "services": 1.4, "second_hand_clothes": 1.2}
 
-# Latent risk shapes behaviour, but only partly (personas.md: features reflect risk partly).
-# z is the vendor's position inside its own persona's risk range: -1 at the low end, +1 at the high end.
-# So within a persona, riskier vendors look somewhat worse. Persona differences still dominate. All are assumptions.
-# Before v0.5 these effects were tied to the raw risk value and came to only about 1 to 2% within a persona.
+# Latent risk partly shapes behaviour. z is the vendor's position in its persona's risk range (-1 low, +1 high).
 RISK_INFLOW_EFFECT = 0.30        # inflow volume falls by this share at z = +1 (and rises at z = -1)
 RISK_FULIZA_EFFECT = 0.25        # added to fuliza_prop per unit of z
 RISK_BILL_MISS_EFFECT = 0.20     # added to bill_miss per unit of z
 RISK_CV_EFFECT = 0.30            # weekly income variation rises by this share at z = +1
 RISK_TREND_EFFECT = 0.015        # monthly income growth rate falls by this much per unit of z
 
-# ---------------------------------------------------------------- transactions
+# Transactions
 TICKET_SIGMA = 0.8               # log-normal spread of sale sizes around the vendor's median (assumption)
 MIN_TICKET = 10
 WEEKDAY_FACTOR = [0.95, 0.95, 1.0, 1.0, 1.15, 1.20, 0.80]   # Mon..Sun (assumption)
@@ -95,37 +86,32 @@ FULIZA_MAX_DRAW = 1000                 # single draw limit (row 9b: KES 50 to 1,
 FULIZA_LIMIT = 3000                    # total outstanding limit (assumption)
 FULIZA_MIN_DRAW = 50
 FULIZA_DRAW_ROUND = 10
-FULIZA_ACCESS_FEE = 0.03               # added to the amount owed. Repaid/drawn was 103% in the author's statement (O11)
+FULIZA_ACCESS_FEE = 0.03               # added to the amount owed
 
 # Approximate M-Pesa charges (illustrative, not the exact tariff): (upper bound, fee)
 SEND_FEE = [(100, 0), (500, 7), (1000, 13), (1500, 23), (2500, 33), (3500, 53), (5000, 57), (7500, 78), (10**9, 90)]
 WITHDRAW_FEE = [(100, 11), (2500, 29), (3500, 52), (5000, 69), (7500, 87), (10**9, 105)]
 PAYBILL_FEE = [(100, 0), (500, 5), (1000, 10), (2500, 15), (5000, 25), (10**9, 30)]
 
-# ---------------------------------------------------------------- loans and labels (personas.md, assumptions.md rows 9a, 10a, 10b)
+# Loans (assumptions.md rows 9a, 10a, 10b)
 LOAN_MEDIAN = 5000                     # row 9a
 LOAN_SIGMA = 0.6
 LOAN_MIN, LOAN_MAX = 500, 10000
 TERM_RANGE = (7, 30)
 APPLICATION_MIN_DAY = 25               # earliest application day after the vendor's first transaction
 APPLICATION_FRACTION = (0.55, 0.90)    # application falls this far through the statement
-# ---------------------------------------------------------------- outcomes (v0.6)
-# 1. `defaulted` comes from the cash-flow scorecard (src/scorecard.py): a probability p per application, then a coin flip.
-# 2. Fuliza lateness is READ from the transactions after the application date (src/outcomes.py).
-# 3. repayment_status combines them: 2 default, 1 late (not defaulted, but a Fuliza draw stayed unpaid past
-#    LATE_THRESHOLD_DAYS), 0 on time.
-TARGET_DEFAULT_RATE = 0.166            # row 10a (FinAccess 2024). The scorecard intercept is set so the average p matches it
+
+# Outcomes
+TARGET_DEFAULT_RATE = 0.166            # row 10a (FinAccess 2024); scorecard intercept is calibrated to this
 OBS_WINDOW_DAYS = 90                   # statements run this many days past the last possible application date
 FULIZA_COUNT_DAYS = 60                 # only Fuliza draws in the first 60 days count, so each has 30 days to be repaid
 LATE_THRESHOLD_DAYS = 30               # a draw unpaid after 30 days is late (Fuliza term; IFRS 9 30-day presumption)
-# Hidden shock: one standard-normal draw per application (illness, market closing). It lowers the vendor's inflows after
-# the application date and also raises default risk in the scorecard, so the two outcomes share a hidden cause.
+# Hidden shock per application: lowers inflows after the application date and raises default risk.
 SHOCK_INFLOW_EFFECT = 0.25             # inflows are multiplied by exp(-effect * shock), clipped to SHOCK_CLIP (assumption)
 SHOCK_CLIP = (0.4, 1.5)
 
-# ---------------------------------------------------------------- scorecard (docs/scorecard_mapping.md)
-# Pillar -> {feature: direction}. +1 means a higher value raises risk, -1 lowers it. Directions are author assumptions
-# supported by cash-flow underwriting practice; see docs/scorecard_mapping.md for the reasoning.
+# Scorecard (docs/scorecard_mapping.md)
+# Pillar -> {feature: direction}. +1 means a higher value raises risk, -1 lowers it.
 SCORECARD_PILLARS = {
     "A_income_stability": {
         "weekly_income_cv_90": +1, "income_active_day_share_90": -1, "repeat_sender_share_90": -1,
@@ -134,8 +120,7 @@ SCORECARD_PILLARS = {
         "near_zero_day_share_90": +1, "balance_median_eod_90": -1, "balance_min_eod_90": -1,
         "net_cash_flow_ratio_90": -1, "balance_trend_90": -1, "balance_cv_90": +1,
         "withdraw_share_of_income_90": +1, "fee_share_of_income_90": +1},
-    # cash_deposit_share_90 is deliberately NOT in the scorecard: its direction is ambiguous and unsupported (own capital added,
-    # or weak mobile-money sales). It stays a model input.
+    # cash_deposit_share_90 is left out: its risk direction is ambiguous. It stays a model input.
     "C_borrowing_distress": {
         "fuliza_draws_90": +1, "fuliza_funded_share_90": +1, "fuliza_repay_lag_median_days_90": +1,
         "days_since_last_fuliza_draw": -1, "failed_payment_share_90": +1, "fuliza_amount_90": +1,
@@ -150,7 +135,7 @@ SCORECARD_PILLARS = {
         "history_days": -1, "income_trend_30_vs_prior": -1, "fuliza_draws_30": +1},
     "G_network": {"unique_senders_90": -1, "till_share_90": -1},
 }
-# Pillar weights (sum to 1). "author" is the main set (docs/scorecard_mapping.md section 1). All are assumptions.
+# Pillar weights (each set sums to 1). All are assumptions.
 WEIGHT_SETS = {
     "author":         {"A_income_stability": 0.30, "B_cash_flow_buffer": 0.25, "C_borrowing_distress": 0.15,
                        "D_affordability": 0.10, "E_obligations": 0.10, "F_history_growth": 0.05, "G_network": 0.05},

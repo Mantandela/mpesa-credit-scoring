@@ -1,9 +1,4 @@
-"""Checks on the synthetic data (docs/personas.md, "Checks after the first run", and docs/data_dictionary.md rules).
-
-Run from the repo root:  python src/check_synthetic.py            (reads data/synthetic/)
-                         python src/check_synthetic.py --dir some/folder
-Prints PASS or FAIL for each rule and a per-persona summary. Nothing is written.
-"""
+"""Sanity checks on the synthetic data against the data dictionary rules and persona targets."""
 import argparse
 import os
 import numpy as np
@@ -68,9 +63,7 @@ def main():
     flag((tx[["paid_in", "withdrawn", "balance"]] >= 0).all().all(), "paid_in, withdrawn and balance never negative")
     draws = tx[tx.txn_type_true == "FULIZA_DRAW"].paid_in
     flag((draws <= 1000).all() and (draws >= 50).all(), f"Fuliza draws between 50 and 1,000 (median {draws.median():.0f}, mean {draws.mean():.0f})")
-    # outcome window: every application must have OBS_WINDOW_DAYS of statement after it. Outcomes are made later by scorecard.py
-    # measured to the designed end of each statement (start_date + statement_days - 1). A vendor with no activity in its last few
-    # days has an earlier LAST TRANSACTION, but the statement period still covers the window.
+    # Measured to the designed statement end, so a vendor quiet in its last days still passes
     end = pd.to_datetime(ve.set_index("vendor_id").start_date) + pd.to_timedelta(ve.set_index("vendor_id").statement_days - 1, unit="D")
     gap = (ap_.vendor_id.map(end) - pd.to_datetime(ap_.application_date)).dt.days
     flag((gap >= 90).all(), f"every application has at least 90 days of statement after it (shortest {gap.min()} days)")

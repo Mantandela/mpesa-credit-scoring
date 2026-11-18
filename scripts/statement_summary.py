@@ -1,17 +1,4 @@
-"""
-Summarise a REAL M-Pesa statement into aggregate numbers only.
-
-Runs on your own computer. Nothing is uploaded. The output contains NO names,
-phone numbers, receipt numbers, dates of single transactions or single rows.
-Categories with fewer than MIN_CELL events are reported as "<5".
-
-Usage (from the repo root, creditscore env active):
-    python scripts/statement_summary.py data/private/statement.csv
-    python scripts/statement_summary.py data/private/statement.pdf --pdf-password 123456
-Optional: --from 2025-01-01 --to 2025-06-30   (to look at one period)
-Output:  docs/statement_summary.md   (safe to paste into chat after you read it)
-Needs:   pandas; for PDF also pdfplumber (pip install pdfplumber)
-"""
+"""Summarise a real M-Pesa statement into privacy-safe aggregate numbers."""
 import argparse, re, sys
 from pathlib import Path
 import numpy as np
@@ -19,7 +6,6 @@ import pandas as pd
 
 MIN_CELL = 5
 
-# ---------- 1. read ----------
 NUM = r"(-?[\d,]+\.\d{2})"
 DATE = r"(\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})"
 TX_RE = re.compile(r"^([A-Z0-9]{8,12})\s*" + DATE + r"\s*(\d{2}:\d{2}(?::\d{2})?)\s*(.*?)\s*([A-Za-z0]{5,12})\s*" + NUM + r"\s*" + NUM + r"\s*" + NUM + r"$")
@@ -170,7 +156,6 @@ def read_statement(path, pw=None, use_ocr=False):
     df["withdrawn"] = df["withdrawn"].abs()
     return df
 
-# ---------- 2. classify ----------
 RULES = [  # (type, regex on lower-cased details); first match wins
     ("fuliza_draw", r"^overdraft(?!charge)|overdraftofcreditparty|fuliza.*(draw|disburs)|overdraw.*(draw|disburs)"),
     ("fuliza_repay", r"odloanrepayment|overdraft.*repay|fuliza.*repay|repayment.*overdraw"),
@@ -214,7 +199,6 @@ def q(x, p): return float(np.nanpercentile(x, p)) if len(x) else np.nan
 def cell(n): return str(n) if n >= MIN_CELL else "<5"
 def fmt(x, d=0): return "n/a" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:,.{d}f}"
 
-# ---------- 3. summarise ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path"); ap.add_argument("--pdf-password")
@@ -248,7 +232,7 @@ def main():
     for t, r in mix.iterrows():
         add(f"| {t} | {cell(int(r.n))} | {fmt(r.paid_in) if r.n >= MIN_CELL else '-'} | {fmt(r.withdrawn) if r.n >= MIN_CELL else '-'} |")
 
-    # activity (assumptions rows 2 and 4)
+    # activity
     per_day = df.groupby("day").size()
     per_month_days = df.groupby("month")["day"].nunique()
     add("\n## 2. Activity (replaces assumptions rows 2 and 4)\n")
@@ -258,7 +242,7 @@ def main():
     add(f"- Transactions per active day excluding fee and Fuliza-draw lines: median {fmt(cpd.median(),1)}, 90th percentile {fmt(q(cpd,90),1)}, max {cpd.max()}")
     add(f"- Transactions per active day (all lines): median {fmt(per_day.median(),1)}, 90th percentile {fmt(q(per_day,90),1)}, max {per_day.max()}")
 
-    # inflows / ticket size (row 1) and till vs send (row 3)
+    # inflows, ticket size and till vs send
     inc = df[df["type"].isin(["till_in", "send_in", "other_in"]) & (df["paid_in"] > 0)]
     add("\n## 3. Money received from people (excluding loans, cash-in, reversals)\n")
     if len(inc):
@@ -273,7 +257,7 @@ def main():
             vc = cp.value_counts()
             repeat_tx = vc[vc > 1].sum() / vc.sum()
             add(f"\n- Repeat-sender share (row 6): {repeat_tx:.0%} of inflows come from a sender who appears more than once; {len(vc)} distinct senders (no identities shown)")
-    # monthly inflow + seasonality (row 5)
+    # monthly inflow and seasonality
     m_in = inc.groupby("month")["paid_in"].sum()
     if len(m_in) >= 4: m_in = m_in.iloc[1:-1]   # drop first and last month: usually partial
     if len(m_in) >= 3:
@@ -286,7 +270,7 @@ def main():
         add(f"- End-of-day balance (KES): 10th pct {fmt(q(bal,10))}, median {fmt(q(bal,50))}, 90th {fmt(q(bal,90))}")
         add(f"- Share of active days ending below KES 100: {(bal<100).mean():.0%}; below KES 20: {(bal<20).mean():.0%}")
 
-    # Fuliza (rows 7c, 9b)
+    # Fuliza
     fd = df[df["type"] == "fuliza_draw"]
     fr = df[df["type"] == "fuliza_repay"]
     add("\n## 5. Fuliza (replaces assumptions rows 7c and 9b)\n")

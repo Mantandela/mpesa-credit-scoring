@@ -1,22 +1,4 @@
-"""Stage 4a: the cash-flow scorecard and the outcomes (docs/scorecard_mapping.md).
-
-Run from the repo root, after generator.py, clean.py and features.py:
-    python src/scorecard.py                      main weights (config.MAIN_WEIGHTS), writes the labels into features.parquet
-    python src/scorecard.py --weights equal      another weight set from config.WEIGHT_SETS
-
-How the outcomes are made
-1. Each feature is turned into a z-score across applications (missing values = the median, so z = 0) and clipped to +/- 3.
-   Multiplied by its direction (+1 raises risk, -1 lowers it), then averaged inside its pillar.
-2. score = sum over pillars of (pillar weight x pillar average). This is the VISIBLE part of the scorecard, built only from features.
-3. logit(p) = intercept + SCORECARD_SCALE x score + HIDDEN_RISK_COEF x z(latent_risk) + SHOCK_COEF x hidden_shock.
-   The last two terms are things a statement cannot show. The intercept is set so the average p equals TARGET_DEFAULT_RATE.
-4. defaulted ~ Bernoulli(p). The scorecard gives a probability, never the final say.
-5. Fuliza lateness is read from the transactions after the application date (src/outcomes.py). repayment_status: 2 default,
-   1 late, 0 on time. late_or_default = status >= 1.
-
-The score, p, latent_risk and hidden_shock are saved as meta columns for checking. They are never model inputs.
-All weights, directions and coefficients are author assumptions (config.py, docs/assumptions.md).
-"""
+"""Cash-flow scorecard that turns features into default probabilities and simulated outcomes."""
 import argparse
 import json
 import os
@@ -68,7 +50,7 @@ def calibrate_intercept(lin: np.ndarray, target: float) -> float:
 
 def draw_default(feat: pd.DataFrame, weights: dict, shock_coef: float, seed: int, scale=C.SCORECARD_SCALE,
                  hidden_coef=C.HIDDEN_RISK_COEF, target=C.TARGET_DEFAULT_RATE) -> pd.DataFrame:
-    """Returns a copy of feat with scorecard_score, scorecard_p, defaulted (and repayment_status if fuliza_late is present)."""
+    """Add scorecard_score, scorecard_p and a Bernoulli-drawn defaulted (plus repayment_status if possible)."""
     score = visible_score(feat, weights)
     zr = (feat.latent_risk - feat.latent_risk.mean()) / feat.latent_risk.std(ddof=0)
     lin = (scale * score + hidden_coef * zr + shock_coef * feat.hidden_shock).to_numpy()
@@ -84,7 +66,7 @@ def draw_default(feat: pd.DataFrame, weights: dict, shock_coef: float, seed: int
 
 
 def read_clean_fuliza(path: str, apps: pd.DataFrame) -> pd.DataFrame:
-    """Fuliza outcomes, reading the cleaned file one parquet row group (a block of whole vendors) at a time."""
+    """Fuliza outcomes, reading the cleaned file one row group at a time."""
     import pyarrow.parquet as pq
     pf = pq.ParquetFile(path)
     parts = []
@@ -135,7 +117,7 @@ def report(df: pd.DataFrame, feats: list, weights_name: str, ceil: dict, shock_c
     top = sorted(a.items(), key=lambda t: -abs(t[1] - 0.5))[:10]
     L += [f"- {k}: {v:.3f}" for k, v in top]
     L += ["", "Single-feature AUCs above about 0.85 would suggest the label leaks into the features."]
-    # transparency check: does the raw association agree with the direction fixed in advance? Directions are NOT changed to fit.
+    # Report features whose raw association disagrees with their preset direction (directions are never tuned)
     dis = []
     for pillar, members in C.SCORECARD_PILLARS.items():
         for f, direction in members.items():

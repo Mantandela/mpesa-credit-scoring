@@ -1,25 +1,4 @@
-"""Synthetic M-Pesa statements for informal-sector vendors.
-
-Run from the repo root:
-    python src/generator.py                      # full run, settings from src/config.py
-    python src/generator.py --n-vendors 50 --max-months 6     # quick check
-
-Writes three tables to data/synthetic/ (parquet if pyarrow is installed, otherwise csv):
-    transactions, vendors, loan_applications     (columns: docs/data_dictionary.md, sections 1 to 3)
-
-How it works, in short:
-  1. Each vendor gets a persona, a business type and its own parameters inside the persona ranges.
-     About 10% of parameters come from an adjacent persona, so personas overlap.
-  2. The vendor's statement is simulated day by day: sales come in (till or send money), the vendor pays
-     suppliers and bills, sends and withdraws money, and Fuliza covers shortfalls. Fuliza is repaid
-     automatically from the next money that arrives, as in a real statement.
-  3. Loan applications are created at random dates inside the vendor's history. Each statement then runs
-     OBS_WINDOW_DAYS (90) days further, so the repayment behaviour after every application is on the statement.
-     Each application also gets a hidden shock that lowers the vendor's inflows after the application date.
-  4. No outcome is written here. The scorecard (src/scorecard.py) sets `defaulted` from the features, and
-     src/outcomes.py reads Fuliza lateness from the transactions after the application date.
-     The vendor's position inside its persona's risk range also shifts its behaviour (config.py, RISK_*_EFFECT).
-"""
+"""Generate synthetic M-Pesa statements, vendors and loan applications for informal-sector vendors."""
 import argparse
 import hashlib
 import math
@@ -49,7 +28,6 @@ def hid(prefix, *parts):
     return prefix + hashlib.md5("-".join(str(p) for p in parts).encode()).hexdigest()[:8].upper()
 
 
-# ------------------------------------------------------------------ vendors
 def make_vendor(rng, idx, max_months):
     names = list(C.PERSONAS)
     persona = rng.choice(names, p=[C.PERSONAS[n]["share"] for n in names])
@@ -96,10 +74,8 @@ def season(v, month):
     return v["peak_ratio"] ** (0.5 * math.cos(2 * math.pi * (month - v["peak_month"]) / 12))
 
 
-# ------------------------------------------------------------------ one vendor's statement
 def simulate_vendor(rng, v, end_date, out, n_days, shocks):
-    """Append this vendor's statement lines to `out` (a list of tuples).
-    n_days: statement length (history plus the outcome window). shocks: [(application day, shock)], sorted by day."""
+    """Append this vendor's statement lines to `out`. shocks: [(application day, shock)], sorted by day."""
     start = end_date - dt.timedelta(days=n_days - 1)
     vid = v["vendor_id"]
     hours = np.array(C.HOUR_WEIGHTS, dtype=float)
@@ -275,10 +251,8 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
     return start
 
 
-# ------------------------------------------------------------------ loans
 def make_applications(rng, v, start, app_counter):
-    """Application dates, amounts, terms and the hidden shock. Outcomes are made later (src/scorecard.py, src/outcomes.py).
-    Dates fall inside the vendor's history, so every application has at least OBS_WINDOW_DAYS of statement after it."""
+    """Application dates, amounts, terms and hidden shocks, all inside the vendor's history."""
     n_days = v["history_days"]
     lo_day = min(C.APPLICATION_MIN_DAY, n_days - 1)
     k = 1 if v["persona"] == "new" else int(rng.integers(1, 5))
@@ -303,7 +277,6 @@ def make_applications(rng, v, start, app_counter):
     return apps
 
 
-# ------------------------------------------------------------------ receipts
 def receipt_numbers(n, offset=0):
     """Unique 10-character base-36 codes that look like M-Pesa receipts. `offset` keeps them unique across chunks."""
     mod = 36 ** 10
@@ -343,8 +316,7 @@ def to_frame(rows, offset):
 
 
 class TxWriter:
-    """Writes the transactions table in chunks of whole vendors, one parquet row group per chunk, so memory stays small.
-    Downstream stages (clean.py, features.py) read one row group at a time. Falls back to one csv if pyarrow is missing."""
+    """Write transactions in chunks of whole vendors, one parquet row group each (csv fallback without pyarrow)."""
 
     def __init__(self, out_dir):
         self.out_dir, self.n, self.frames, self.writer = out_dir, 0, [], None
@@ -399,7 +371,7 @@ def main():
         vendors.append({"vendor_id": v["vendor_id"], "business_type": v["business_type"], "gender": v["gender"],
                         "start_date": start.date().isoformat(), "months_of_history": v["months_of_history"],
                         "statement_days": total_days, "persona": v["persona"], "latent_risk": round(v["latent_risk"], 4)})
-        if i % C.CHUNK_VENDORS == 0 or i == a.n_vendors:      # write whole vendors only, then free the memory
+        if i % C.CHUNK_VENDORS == 0 or i == a.n_vendors:
             writer.add(rows)
             rows.clear()
             print(f"  {i}/{a.n_vendors} vendors, {writer.n:,} lines", flush=True)

@@ -1,22 +1,4 @@
-"""Stage 4: split by vendor and train the three models.
-
-Run from the repo root:
-    python src/train_models.py                    reads data/processed/features.parquet and feature_columns.json
-    python src/train_models.py --seed 7           another random split
-    python src/train_models.py --quick            smaller grids and fewer trees (for a fast check)
-
-What it does
-1. Splits VENDORS (not applications) 70/15/15 into train, validation and test, balanced by persona, so no vendor
-   appears in two splits. A vendor can have up to four applications, so a split by application would leak.
-2. Tunes each model on the training vendors only, with 5-fold cross-validation grouped by vendor.
-3. Fits the best setting on train, uses the validation set to set the approval cutoff, and scores the test set once.
-4. Compares: logistic regression, Random Forest, XGBoost and a one-feature rule baseline.
-
-Writes: models/*.joblib, data/processed/predictions.parquet, docs/model_report.md, docs/figures/roc_test.png
-Only the columns listed as "features" in feature_columns.json are model inputs. persona, gender, business_type,
-and every outcome or hidden column (defaulted, repayment_status, scorecard_p, hidden_shock, ...) are never inputs.
-They are kept in the predictions file for checks only.
-"""
+"""Split applications by vendor, then tune and evaluate logistic, random forest and XGBoost default models."""
 import argparse
 import json
 import os
@@ -40,7 +22,6 @@ SPLITS = (0.70, 0.15, 0.15)
 APPROVAL_LEVELS = (0.70, 0.80, 0.90)
 
 
-# ---------------------------------------------------------------- split
 def split_vendors(feat: pd.DataFrame, seed: int) -> dict:
     """Assign each vendor to train, val or test. Balanced by persona. Returns {vendor_id: split}."""
     rng = np.random.default_rng(seed)
@@ -55,7 +36,6 @@ def split_vendors(feat: pd.DataFrame, seed: int) -> dict:
     return assign
 
 
-# ---------------------------------------------------------------- models
 def make_model(name, **p):
     imp = SimpleImputer(strategy="median", add_indicator=True)
     if name == "logistic":
@@ -102,7 +82,6 @@ def oof_predictions(name, params, X, y, groups, seed):
     return out
 
 
-# ---------------------------------------------------------------- metrics
 def ks_stat(y, p):
     return float(ks_2samp(p[y == 1], p[y == 0]).statistic)
 
@@ -140,7 +119,6 @@ def md_table(df):
     return "\n".join(out)
 
 
-# ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", default="data/processed/features.parquet")
@@ -175,7 +153,7 @@ def main():
     Xva, yva = va[F], va.defaulted.astype(int).to_numpy()
     Xte, yte = te[F], te.defaulted.astype(int).to_numpy()
 
-    # ---- tune on train only
+    # Tune on train only
     best, fitted, tune_rows = {}, {}, []
     for name, grid in grids(a.quick).items():
         scored = [(cv_auc(name, p, Xtr, ytr, gtr, a.seed), p) for p in grid]
@@ -185,17 +163,17 @@ def main():
         fitted[name] = make_model(name, **p).fit(Xtr, ytr)
         print(f"{name}: best {p}  CV AUC {m:.3f} +/- {s:.3f}")
 
-    # ---- score validation and test
+    # Score validation and test
     P_va = {n: proba(m, Xva) for n, m in fitted.items()}
     P_te = {n: proba(m, Xte) for n, m in fitted.items()}
-    # rule baseline: more near-zero-balance days = riskier. No fitting.
+    # Rule baseline: more near-zero-balance days = riskier
     base_col = "near_zero_day_share_90"
     fill = float(tr[base_col].median())
     P_va["rule_baseline"] = va[base_col].fillna(fill).to_numpy()
     P_te["rule_baseline"] = te[base_col].fillna(fill).to_numpy()
 
     names = ["logistic", "random_forest", "xgboost", "rule_baseline"]
-    if "scorecard_score" in feat.columns:              # the visible scorecard, with no fitting: the baseline to beat
+    if "scorecard_score" in feat.columns:              # visible scorecard, no fitting
         P_va["scorecard_baseline"] = va.scorecard_score.to_numpy()
         P_te["scorecard_baseline"] = te.scorecard_score.to_numpy()
         names.append("scorecard_baseline")
@@ -209,7 +187,7 @@ def main():
     res = pd.DataFrame(rows)
     print("\n", res.round(3).to_string(index=False))
 
-    # ---- lender view: cutoff set on validation, applied to test
+    # Lender view: cutoff set on validation, applied to test
     lend = []
     for n in names:
         for r in APPROVAL_LEVELS:
@@ -218,7 +196,7 @@ def main():
             lend.append({"model": n, "approval target": f"{r:.0%}", "actual approval on test": ar, "default rate among approved": br})
     lend = pd.DataFrame(lend)
 
-    # ---- do the models separate vendors inside each persona? (out-of-fold on train+val)
+    # Within-persona AUC, out-of-fold on train + val
     dev = pd.concat([tr, va])
     Xd, yd, gd = dev[F], dev.defaulted.astype(int), dev.vendor_id
     oof = {n: oof_predictions(n, best[n], Xd, yd, gd, a.seed) for n in ("logistic", "random_forest", "xgboost")}
@@ -233,7 +211,7 @@ def main():
     pers = pd.DataFrame(pers)
     overall_oof = {n: roc_auc_score(yd, oof[n]) for n in oof}
 
-    # ---- importance
+    # Feature importance
     xgb = fitted["xgboost"]
     imp_x = pd.Series(xgb.feature_importances_, index=F).sort_values(ascending=False).head(12)
     lr = fitted["logistic"]
@@ -241,7 +219,7 @@ def main():
     coef = pd.Series(lr.named_steps["m"].coef_[0], index=names_lr)
     coef = coef.reindex(coef.abs().sort_values(ascending=False).index).head(12)
 
-    # ---- save
+    # Save
     os.makedirs(a.out, exist_ok=True)
     os.makedirs(a.models_dir, exist_ok=True)
     for n, m in fitted.items():
@@ -269,7 +247,7 @@ def main():
     except Exception as e:
         print("figure skipped:", e)
 
-    # ---- report
+    # Report
     few = int(te.defaulted.sum()) < 15
     L = ["# Model report", "",
          f"Seed {a.seed}. Split by vendor, balanced by persona. {len(F)} features. Labels are simulated (see assumptions.md), so "

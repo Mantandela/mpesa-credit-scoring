@@ -1,11 +1,4 @@
-"""Log the public datasets in data/raw/ (source, licence, download date, sha256).
-
-Run from the repo root:  python scripts/download_public_data.py
-The files are placed by hand in data/raw/ (flat, no subfolders). This script does not download anything:
-it checks that each expected file is there and writes data/raw/SOURCES.csv.
-
-Fix any "FILL" entry below, then run it again. Files already logged are skipped.
-"""
+"""Check the hand-placed public datasets in data/raw/ and log them to SOURCES.csv."""
 import csv, datetime as dt, hashlib, pathlib
 
 RAW = pathlib.Path("data/raw")

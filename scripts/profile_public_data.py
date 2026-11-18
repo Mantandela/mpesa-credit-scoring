@@ -1,11 +1,4 @@
-"""Profile every data file in data/raw/ (flat files or subfolders) into one column-level dictionary.
-The PDF (FinAccess report) is skipped.
-
-Run from the repo root:  python scripts/profile_public_data.py
-Writes docs/public_data_profile.csv with: dataset, file, column, dtype, rows, n_missing, pct_missing, n_unique, example.
-Reads: .csv, .xlsx/.xls, .dta (Stata), .sav (SPSS, needs pip install pyreadstat), .json, and german.data.
-Survey files (.dta/.sav) also get the variable label as `description`.
-"""
+"""Profile every data file in data/raw/ into a column-level dictionary."""
 import pathlib
 import pandas as pd
 

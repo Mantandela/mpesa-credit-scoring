@@ -1,17 +1,4 @@
-"""Export the generated data to CSV so it can be opened in Excel or VS Code.
-
-Run from the repo root, any time after the generator (the later files appear once their stage has run):
-    python scripts/export_csv.py                     everything available, with a small transaction sample
-    python scripts/export_csv.py --vendor V00007     transactions of one named vendor instead of the sample
-    python scripts/export_csv.py --full              ALSO write every transaction line
-                                                     (millions of rows: too big for Excel, fine for VS Code or pandas)
-
-What is written to data/exports/ (add it to .gitignore). The parquet files are not changed.
-  after generator.py : vendors.csv, loan_applications.csv, transactions_sample.csv (one median vendor per persona)
-  after clean.py     : transactions_clean_sample.csv (same vendors, with the classified type and flags)
-  after features.py  : features.csv (52 features, no outcomes yet)
-  after scorecard.py : loan_applications_with_outcomes.csv and features_with_labels.csv (defaulted, fuliza_late, repayment_status, ...)
-"""
+"""Export the generated data to CSV for viewing in Excel or VS Code."""
 import argparse
 import os
 import pandas as pd
@@ -48,7 +35,7 @@ def main():
     ap_.to_csv(os.path.join(a.out, "loan_applications.csv"), index=False)
     print(f"vendors.csv ({len(ve)} rows), loan_applications.csv ({len(ap_)} rows)")
 
-    # ---- transactions: one median vendor per persona, or the vendor asked for
+    # Transactions: one median vendor per persona, or the requested vendor
     if a.vendor:
         ids = [a.vendor]
         if a.vendor not in set(ve.vendor_id):
@@ -70,7 +57,7 @@ def main():
 
     if a.full:
         out_path, total = os.path.join(a.out, "transactions_full.csv"), 0
-        if parquet:                                   # one chunk at a time so memory stays small
+        if parquet:                                   # one chunk at a time
             import pyarrow.parquet as pq
             pf = pq.ParquetFile(path)
             for i in range(pf.num_row_groups):
@@ -83,7 +70,7 @@ def main():
             total = len(full)
         print(f"transactions_full.csv ({total:,} rows). Too large for Excel, open it in VS Code or pandas.")
 
-    # ---- cleaned transactions (after clean.py)
+    # Cleaned transactions (after clean.py)
     cpath = os.path.join(a.clean_dir, "transactions_clean.parquet")
     if os.path.exists(cpath):
         ct = pd.read_parquet(cpath, filters=[("vendor_id", "in", ids)])
@@ -93,7 +80,7 @@ def main():
     else:
         print("transactions_clean_sample.csv skipped (run clean.py first)")
 
-    # ---- features and outcomes (after features.py and scorecard.py)
+    # Features and outcomes (after features.py and scorecard.py)
     fpath = os.path.join(a.features_dir, "features.parquet")
     if os.path.exists(fpath):
         f = pd.read_parquet(fpath)

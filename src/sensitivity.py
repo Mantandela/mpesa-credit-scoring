@@ -1,19 +1,4 @@
-"""Sensitivity run: do the conclusions depend on the scorecard weights or on the size of the hidden shock?
-
-Run from the repo root, after scorecard.py:
-    python src/sensitivity.py                 all variants in VARIANTS below
-    python src/sensitivity.py --quick
-
-The transactions and features do not depend on the weights, so for each variant this script only redraws the labels for the SAME
-applications (scorecard.draw_default), trains the models (src/train_models.py) and records the results. Fuliza lateness is read from
-the transactions, so it does not change between variants (only the default draw and the status that depends on it do).
-
-Variants: the four weight sets in config.WEIGHT_SETS at the main shock coefficient, and the main weights at the other shock levels.
-The shock coefficient controls how much of default the statements cannot explain (larger = harder to predict).
-Each result is reported next to the best possible AUC (the scorecard probability itself) and the visible scorecard with no fitting.
-
-Writes docs/sensitivity_report.md, docs/figures/sensitivity.png and per-variant files under data/processed/sensitivity/.
-"""
+"""Retrain the models under different scorecard weights and hidden-shock sizes to test robustness."""
 import argparse
 import json
 import os

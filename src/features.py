@@ -1,21 +1,4 @@
-"""Stage 3: features (docs/data_dictionary.md section 4).
-
-One row per loan application. Every feature is built ONLY from cleaned transactions completed before the
-application date (strictly earlier than midnight at the start of `application_date`). No outcome is used here.
-
-Run from the repo root:
-    python src/features.py                      reads data/interim/transactions_clean and data/synthetic/{vendors,loan_applications}
-    python src/features.py --skip-check         skip the leakage test (faster)
-
-Writes:
-    data/processed/features.parquet          one row per application: meta columns + feature columns
-    data/processed/feature_columns.json      which columns are features and which are meta (ids, labels, slicing columns)
-    docs/feature_report.md                   missing values per feature and a quick signal check
-
-Never features: persona, latent_risk, hidden_shock, txn_type_true, gender (fairness check only), business_type and every
-outcome column. They are kept in the meta columns for slicing and checking only.
-Missing values are left as NaN on purpose (for example a ratio with no income). Impute inside the model pipeline.
-"""
+"""Build leakage-free cash-flow features, one row per loan application."""
 import argparse
 import json
 import os
@@ -26,8 +9,7 @@ WINDOWS = (30, 60, 90)
 INCOME = ("TILL_PAYMENT_IN", "SEND_MONEY_IN")
 PAYMENT_OUT = ("SEND_MONEY_OUT", "BUY_GOODS_OUT", "PAYBILL_OUT", "AIRTIME_OUT")
 NEAR_ZERO = 100                       # KES. End-of-day balance below this counts as near zero
-META = ["application_id", "vendor_id", "application_date", "business_type", "gender", "persona"]
-# Outcome and hidden columns (defaulted, repayment_status, hidden_shock, latent_risk, ...) are added by src/scorecard.py.
+META = ["application_id", "vendor_id", "application_date", "business_type", "gender", "persona"]  # never model inputs
 
 
 def load(d, name):
@@ -50,19 +32,19 @@ def save(df, folder, name):
 
 
 def _div(a, b):
+    # NaN on purpose when undefined; imputation happens in the model pipeline
     return float(a) / float(b) if b and not pd.isna(b) and b != 0 else np.nan
 
 
 def daily_end_balance(past: pd.DataFrame, cut: pd.Timestamp) -> pd.Series:
-    """End-of-day balance for every calendar day from the first transaction to the day before `cut`.
-    Days without transactions carry the last balance forward."""
+    """End-of-day balance for each day before `cut`, carrying the last balance over quiet days."""
     eod = past.groupby(past.completion_time.dt.normalize())["balance"].last()
     days = pd.date_range(eod.index.min(), cut - pd.Timedelta(days=1), freq="D")
     return eod.reindex(days).ffill()
 
 
 def build_row(g: pd.DataFrame, app) -> dict:
-    """Features for one application. `g` is one vendor's cleaned transactions. Only rows before the date are used."""
+    """Features for one application from one vendor's transactions before the application date."""
     cut = pd.Timestamp(app.application_date).normalize()
     past = g[g.completion_time < cut]                       # <- the only place data is selected by time
     row = {"requested_amount": float(app.requested_amount), "requested_term_days": float(app.requested_term_days)}
@@ -94,11 +76,11 @@ def build_row(g: pd.DataFrame, app) -> dict:
         row[f"fuliza_draws_{w}"] = float((wk.txn_type == "FULIZA_DRAW").sum())
         row[f"withdraw_share_of_income_{w}"] = _div(wk.loc[wk.txn_type == "WITHDRAW_AGENT", "withdrawn"].sum(), inc.paid_in.sum())
 
-    # ---- 90-day detail
+    # 90-day features
     w90 = win(ok, 90)
     inc90 = win(inc_all, 90)
     obs90 = min(90.0, history)
-    # weekly stability: 7-day blocks counted back from the application date, only blocks inside the history
+    # Weekly stability: 7-day blocks counted back from the application date
     age = (cut - inc90.completion_time).dt.days // 7
     n_blocks = int(min(12, history // 7))
     if n_blocks >= 3:
@@ -156,14 +138,14 @@ def build_row(g: pd.DataFrame, app) -> dict:
         row["balance_trend_90"] = _div(last.median(), prev.median()) if prev.median() > 0 else np.nan
     else:
         row["balance_trend_90"] = np.nan
-    # cash-flow ratios (docs/scorecard_mapping.md). Spending = payments out and fees; cash taken out at an agent is not spending.
+    # Spending = payments out and fees; agent withdrawals are not spending
     spend = w90[w90.txn_type.isin(PAYMENT_OUT + ("FEE",))].withdrawn.sum()
     essential = w90[w90.txn_type.isin(("PAYBILL_OUT", "AIRTIME_OUT"))].withdrawn.sum()
     row["net_cash_flow_ratio_90"] = _div(income[90] - spend, income[90])
     row["essential_outflow_share_90"] = _div(essential, w90[w90.txn_type.isin(PAYMENT_OUT)].withdrawn.sum())
     row["free_cash_flow_ratio_90"] = _div(income[90] - essential, income[90])
     row["debt_service_ratio_90"] = _div(w90.loc[w90.txn_type == "FULIZA_REPAY", "withdrawn"].sum(), income[90])
-    # affordability: the loan against what the vendor takes in
+    # Affordability
     row["amount_to_income_30"] = _div(app.requested_amount, income[30])
     row["amount_to_avg_monthly_income_90"] = _div(app.requested_amount, income[90] * 30.0 / obs90 if obs90 else np.nan)
     return row
@@ -200,8 +182,7 @@ TX_COLUMNS = ["vendor_id", "completion_time", "txn_type", "is_failed", "fuliza_f
 
 
 def build_in_chunks(path: str, apps: pd.DataFrame):
-    """Same result as build(), reading the cleaned file one parquet row group (a block of whole vendors) at a time.
-    Returns the features and a map vendor -> row group, which the leakage test needs."""
+    """build() over a chunked file, one row group at a time. Also returns the vendor -> row group map."""
     import pyarrow.parquet as pq
     pf = pq.ParquetFile(path)
     parts, rg_of = [], {}
@@ -275,7 +256,7 @@ def main():
             chunked = pq.ParquetFile(src).num_row_groups > 1
         except ImportError:
             pass
-    if chunked:                                       # big file: one block of vendors in memory at a time
+    if chunked:
         feat, rg_of, pf = build_in_chunks(src, apps)
     else:
         tx = load(a.clean, "transactions_clean")
