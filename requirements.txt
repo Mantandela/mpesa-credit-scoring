@@ -1,0 +1,16 @@
+pandas
+numpy
+scipy
+scikit-learn
+xgboost
+pyarrow
+openpyxl
+matplotlib
+joblib
+shap
+pdfplumber
+pypdf
+reportlab
+cryptography
+streamlit>=1.50
+pytest
