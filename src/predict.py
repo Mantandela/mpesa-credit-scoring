@@ -3,9 +3,17 @@
     score_statement(statement, requested_amount=None, requested_term_days=None, application_date=None,
                     model_path="models/logistic.joblib", reference_path="models/reference.json", password=None) -> dict
 
+    score_uploaded_file(file_bytes_or_path, filename, requested_amount=None, requested_term_days=None, password=None)
+
 `statement` is a raw transactions DataFrame (generator schema, or the table from pdf_statement.read_statement) or a
-path to a .pdf/.xlsx/.xls/.csv statement. The pipeline is the training pipeline for one application:
+path to an .xlsx/.xls/.csv statement (or a PDF with a text layer; real M-Pesa PDFs are scanned images and cannot be
+read). The pipeline is the training pipeline for one application:
 clean.clean -> transactions before application_date -> features.build_row -> logistic model -> scoring.pd_to_score.
+
+The score, pillar ratings and reasons are worked out at the MEDIAN request from reference.json, whatever amount and
+term the caller passes: the trained model's coefficients on the request fields are not monotone, so scoring the
+caller's request could show a larger loan as less risky. The requested amount and term feed only the separate
+`affordability` block (ratios to income and a comfortable / stretched / heavy band, monotone by construction).
 
 Needs models/logistic.joblib (src/train_models.py) and models/reference.json + models/shap_background.parquet
 (src/build_reference.py). All outcomes the model learned from are SIMULATED; see docs/scoring_function.md.
@@ -15,9 +23,12 @@ Nothing here prints or logs transaction details, names or phone numbers. The CLI
 CLI (repo root):  python src/predict.py <statement file> --amount 5000 --term 14 [--date 2026-03-15] [--ask-password]
 """
 import argparse
+import gc
 import json
 import math
+import os
 import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +43,7 @@ import config as C  # noqa: E402
 import features as Fe  # noqa: E402
 import feature_labels as FL  # noqa: E402
 import scorecard as SC  # noqa: E402
-from pdf_statement import counterparty_hash, counterparty_text, read_statement  # noqa: E402
+from pdf_statement import StatementError, counterparty_hash, counterparty_text, read_statement  # noqa: E402
 from scoring import pd_to_score, risk_tier  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +51,15 @@ THIN_HISTORY_DAYS = max(Fe.WINDOWS)          # the features look back 90 days
 N_REASONS = 5
 RATING_LABELS = ((25, "Weak"), (50, "Fair"), (75, "Good"), (101, "Strong"))
 REQUIRED = ("completion_time", "details", "paid_in", "withdrawn", "balance")
+AFFORDABILITY_BANDS = ("comfortable", "stretched", "heavy")       # up to p50, up to p85, above p85
+BAND_NOTES = {
+    "comfortable": "Compared with your income, this loan is no larger than for a typical applicant.",
+    "stretched": "Compared with your income, this loan is larger than for a typical applicant.",
+    "heavy": "Compared with your income, this loan is larger than for 85% of applicants.",
+    "unknown": "No customer income in the last 90 days, so affordability cannot be judged.",
+}
+UPLOAD_TYPES = (".xlsx", ".xls", ".csv", ".pdf")
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def _resolve(p) -> Path:
@@ -89,7 +109,7 @@ def _prepare(statement, password) -> tuple:
     elif isinstance(statement, pd.DataFrame):
         tx = statement.copy()
     else:
-        raise TypeError("statement must be a DataFrame or a path to a .pdf, .xlsx, .xls or .csv file")
+        raise TypeError("statement must be a DataFrame or a path to an .xlsx, .xls or .csv file (or a text PDF)")
     warnings = list(tx.attrs.get("warnings", []))
     if tx.empty:
         raise ValueError("The statement has no transactions.")
@@ -152,12 +172,10 @@ def _num(v):
     return None if math.isnan(v) else v
 
 
-def score_statement(statement, requested_amount=None, requested_term_days=None, application_date=None,
-                    model_path="models/logistic.joblib", reference_path="models/reference.json", password=None) -> dict:
-    bundle, ref, explainer, names = _models(model_path, reference_path)
-    F = list(bundle["features"])
+# ------------------------------------------------------------------ low-level steps (also used by the tests)
+def _used_transactions(statement, application_date=None, password=None) -> tuple:
+    """Cleaned transactions before the application date: (used, cut, rows_after_date_ignored, warnings)."""
     tx, warnings = _prepare(statement, password)
-
     cleaned = clean.clean(tx)
     if application_date is None:
         cut = cleaned.completion_time.max().normalize() + pd.Timedelta(days=1)
@@ -166,15 +184,60 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
     used = cleaned[cleaned.completion_time < cut]
     if used.empty or used.is_failed.all():
         raise ValueError(f"No usable transactions before the application date {cut.date().isoformat()}.")
+    return used, cut, int((cleaned.completion_time >= cut).sum()), warnings
 
+
+def _feature_frame(used, cut, amount, term, features) -> tuple:
+    """features.build_row for one request: (row dict, one-row frame in the model's column order)."""
+    app = SimpleNamespace(application_date=cut, requested_amount=float(amount), requested_term_days=float(term))
+    row = Fe.build_row(used, app)
+    return row, pd.DataFrame([row]).reindex(columns=features).astype(float)
+
+
+def _probability(features_row: pd.DataFrame, model) -> float:
+    """Probability of default from the trained pipeline for a one-row feature frame, for any request in the row."""
+    return float(model.predict_proba(features_row)[0, 1])
+
+
+def _affordability(row: dict, amount: float, term: float, ref: dict) -> dict:
+    """Affordability of the request the caller gave, from the vendor's income (the same ratios as features.build_row).
+    The band uses fixed cutoffs on amount_to_avg_monthly_income_90, so a larger amount never gives a better band."""
+    bands = ref.get("affordability_bands")
+    if bands is None:
+        raise ValueError("models/reference.json has no affordability_bands. Rerun python src/build_reference.py.")
+    obs90 = min(float(THIN_HISTORY_DAYS), float(row.get("history_days", 0.0)))
+    r30 = Fe._div(amount, row.get("income_total_30", np.nan))
+    r90 = Fe._div(amount, row.get("income_total_90", np.nan) * 30.0 / obs90 if obs90 else np.nan)
+    if math.isnan(r90):
+        band = "unknown"
+    else:
+        band = next(b for b, upper in zip(AFFORDABILITY_BANDS, (bands["p50"], bands["p85"], math.inf)) if r90 <= upper)
+    return {"requested_amount": amount, "requested_term_days": term, "estimated_repayment": amount,
+            "amount_to_income_30": _num(r30), "amount_to_avg_monthly_income_90": _num(r90), "band": band,
+            "band_cutoffs": {"comfortable_up_to": bands["p50"], "stretched_up_to": bands["p85"]},
+            "note": BAND_NOTES[band]}
+
+
+# ------------------------------------------------------------------ scoring
+def score_statement(statement, requested_amount=None, requested_term_days=None, application_date=None,
+                    model_path="models/logistic.joblib", reference_path="models/reference.json", password=None) -> dict:
+    bundle, ref, explainer, names = _models(model_path, reference_path)
+    F = list(bundle["features"])
+    used, cut, ignored, warnings = _used_transactions(statement, application_date, password)
+
+    # The request the caller gave is used for the affordability block only. The score is worked out at the median
+    # request, because the trained model's coefficients on the request fields are not monotone (a larger request
+    # could lower the predicted risk).
     amount = _clip("requested_amount", requested_amount, ref["requested_amount"], warnings)
     term = _clip("requested_term_days", requested_term_days, ref["requested_term_days"], warnings)
-    app = SimpleNamespace(application_date=cut, requested_amount=amount, requested_term_days=term)
-    row = Fe.build_row(used, app)
-    X = pd.DataFrame([row]).reindex(columns=F).astype(float)
+    med_amount, med_term = float(ref["requested_amount"]["median"]), float(ref["requested_term_days"]["median"])
+    row, X = _feature_frame(used, cut, med_amount, med_term, F)
+    warnings.append({"code": "score_at_median_request",
+                     "message": f"The score is worked out for a typical loan (KES {med_amount:,.0f} for {med_term:g} days), "
+                                "so it does not depend on the loan you ask for. See 'affordability' for your request."})
 
     pipe = bundle["model"]
-    p = float(pipe.predict_proba(X)[0, 1])
+    p = _probability(X, pipe)
     logit = float(pipe.decision_function(X)[0])
 
     # Pillar ratings against the reference population
@@ -188,16 +251,11 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
     Xt = pipe[:-1].transform(X)
     sv = np.asarray(explainer.shap_values(Xt)).reshape(-1)
     base = float(np.asarray(explainer.expected_value).reshape(-1)[0])
-    raw ={n: (row.get(n, np.nan) if i < len(F) else float(np.isnan(X.iloc[0][FL.base_feature(n)])))
-           for i, n in enumerate(names)}
-    med = ref.get("feature_medians", {})
-    top = []
-    for i in np.argsort(-np.abs(sv), kind="stable")[:N_REASONS]:      # ties keep feature order (deterministic)
-        n = names[i]
-        v = _num(raw[n])
-        top.append({"feature": n, "label": FL.label(n), "value": v,
-                    "direction": "raises risk" if sv[i] > 0 else "lowers risk", "shap_value": float(sv[i]),
-                    "sentence": FL.reason_sentence(n, float(sv[i]), v, med.get(FL.base_feature(n)))})
+    x0 = X.iloc[0]
+    values = {n: (float(x0[n]) if i < len(F) else float(np.isnan(x0[FL.base_feature(n)]))) for i, n in enumerate(names)}
+    # Neutral (no-data) items never count as reasons; one reason per family; contradictions keep the larger SHAP
+    top, data_notes = FL.select_reasons(dict(zip(names, (float(s) for s in sv))), values,
+                                        ref.get("feature_medians", {}), N_REASONS)
 
     history = float(row.get("history_days", 0.0))
     if history < THIN_HISTORY_DAYS:
@@ -206,7 +264,6 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
     counts = {f: int(used[f].sum()) for f in clean.FLAGS if int(used[f].sum())}
     if counts:
         warnings.append({"code": "integrity_flags", "message": "Rows that broke a statement check (counts only).", "counts": counts})
-    ignored = int((cleaned.completion_time >= cut).sum())
 
     return {
         "probability_of_default": p,
@@ -214,8 +271,12 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
         "tier": risk_tier(p),
         "pillar_ratings": pillar_ratings,
         "top_reasons": top,
-        "inputs_used": {"requested_amount": amount, "requested_term_days": term, "application_date": cut.date().isoformat(),
-                        "history_days": history, "transactions_used": int(len(used)), "transactions_after_date_ignored": ignored},
+        "data_notes": data_notes,
+        "affordability": _affordability(row, amount, term, ref),
+        "inputs_used": {"requested_amount": amount, "requested_term_days": term,
+                        "scored_at": {"requested_amount": med_amount, "requested_term_days": med_term},
+                        "application_date": cut.date().isoformat(), "history_days": history,
+                        "transactions_used": int(len(used)), "transactions_after_date_ignored": ignored},
         "warnings": warnings,
         "explanation": {"base_value": base, "logit": logit, "shap_values": {n: float(v) for n, v in zip(names, sv)}},
         "model_info": {"model": "logistic", "seed": bundle.get("seed"), "n_features": len(F),
@@ -223,11 +284,60 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
     }
 
 
+# ------------------------------------------------------------------ uploads
+def _delete(path: Path) -> None:
+    """Delete a temporary upload. On Windows a reader can hold the file until garbage collection, so retry once."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        gc.collect()
+        path.unlink(missing_ok=True)          # raises if the file still cannot be deleted: never leave it silently
+
+
+def score_uploaded_file(file_bytes_or_path, filename, requested_amount=None, requested_term_days=None, password=None,
+                        application_date=None, model_path="models/logistic.joblib",
+                        reference_path="models/reference.json") -> dict:
+    """Score an uploaded statement and return the score_statement result.
+
+    file_bytes_or_path: the file's bytes, a binary file object (e.g. a web upload), or a path. `filename` gives the type
+    (.xlsx, .xls, .csv or a PDF with a text layer); only its extension is used. The content is read into memory and
+    written to ONE temporary file (random name, in the system temp folder) because the readers work from a path; that
+    file is deleted in a `finally`, after success and after any error. The upload is never written anywhere else,
+    logged or cached, and the result holds no statement content (no details, names, phone numbers or counterparties).
+    """
+    ext = Path(str(filename)).suffix.lower()
+    if ext not in UPLOAD_TYPES:
+        raise StatementError("Unsupported file type. Upload the Excel (.xlsx) or CSV version of your M-Pesa statement.")
+    if isinstance(file_bytes_or_path, (str, os.PathLike)):
+        data = Path(file_bytes_or_path).read_bytes()
+    elif hasattr(file_bytes_or_path, "read"):
+        data = file_bytes_or_path.read()
+    else:
+        data = file_bytes_or_path
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("file_bytes_or_path must be bytes, a binary file object or a path")
+    if len(data) == 0:
+        raise StatementError("The uploaded file is empty.")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise StatementError(f"The uploaded file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    fd, name = tempfile.mkstemp(prefix="statement_", suffix=ext)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        return score_statement(tmp, requested_amount, requested_term_days, application_date,
+                               model_path=model_path, reference_path=reference_path, password=password)
+    finally:
+        _delete(tmp)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Score one M-Pesa statement. Prints JSON only.")
-    ap.add_argument("statement", help=".pdf, .xlsx, .xls or .csv")
-    ap.add_argument("--amount", type=float, default=None, help="requested loan amount in KES (default: training median)")
-    ap.add_argument("--term", type=float, default=None, help="requested term in days (default: training median)")
+    ap.add_argument("statement", help=".xlsx, .xls or .csv (a PDF only if it has a text layer; M-Pesa PDFs are scanned)")
+    ap.add_argument("--amount", type=float, default=None,
+                    help="requested loan amount in KES, for the affordability block only (default: training median)")
+    ap.add_argument("--term", type=float, default=None,
+                    help="requested term in days, for the affordability block only (default: training median)")
     ap.add_argument("--date", default=None, help="application date YYYY-MM-DD (default: the day after the last transaction)")
     ap.add_argument("--model", default="models/logistic.joblib")
     ap.add_argument("--reference", default="models/reference.json")

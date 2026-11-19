@@ -6,6 +6,7 @@ CREDIT_DATA_DIR is set (PowerShell: $env:CREDIT_DATA_DIR = "data"; python -m pyt
 """
 import json
 import os
+import re
 from pathlib import Path
 
 import joblib
@@ -16,13 +17,13 @@ import pytest
 import build_reference as BR
 import clean
 import config as C
+import feature_labels as FL
 import features as Fe
 import predict as P
 import toy
 from train_models import make_model
 
 ROOT = Path(__file__).resolve().parent.parent
-AFFORDABILITY = ("requested_amount", "amount_to_income_30", "amount_to_avg_monthly_income_90")
 APP_DATE = "2026-03-15"
 
 
@@ -112,23 +113,118 @@ def test_output_shape_and_ranges(toy_artifacts, raw_vendor):
 def test_shap_values_add_up_to_the_decision_function(toy_artifacts, raw_vendor):
     out = _score(toy_artifacts, raw_vendor, requested_amount=5000, requested_term_days=14)
     e = out["explanation"]
-    total = e["base_value"] + sum(e["shap_values"].values())
+    total = e["base_value"] + sum(e["shap_values"].values())             # the unmerged values, all of them
     p = out["probability_of_default"]
+    assert len(e["shap_values"]) >= len(toy_artifacts["F"])
     assert total == pytest.approx(e["logit"], abs=1e-6)
     assert total == pytest.approx(np.log(p / (1 - p)), abs=1e-6)
-    top = sorted(e["shap_values"].items(), key=lambda kv: -abs(kv[1]))[:5]
-    assert [r["feature"] for r in out["top_reasons"]] == [k for k, _ in top]
+    for r in out["top_reasons"]:                                         # each reason carries its feature's own value
+        assert r["shap_value"] == e["shap_values"][r["feature"]]
 
 
-def test_higher_amount_never_lowers_risk(toy_artifacts, raw_vendor):
-    m = joblib.load(toy_artifacts["model"])["model"]
-    coef = dict(zip(toy_artifacts["F"], m.named_steps["m"].coef_[0]))
-    assert all(coef[f] > 0 for f in AFFORDABILITY), "toy model precondition: affordability features raise risk"
-    ref = toy_artifacts["reference"]["requested_amount"]
-    pds = [_score(toy_artifacts, raw_vendor, requested_amount=a, requested_term_days=14)["probability_of_default"]
-           for a in np.linspace(ref["p01"], ref["p99"], 7)]
-    assert all(b >= a - 1e-12 for a, b in zip(pds, pds[1:]))
-    assert pds[-1] > pds[0]
+# ---------------------------------------------------------------- reasons
+def _reason_checks(out):
+    reasons = out["top_reasons"]
+    assert len(reasons) == 5
+    fams = [r["family"] for r in reasons]
+    assert len(set(fams)) == 5, f"repeated family: {fams}"
+    assert all(r["family"] == FL.family(r["feature"]) for r in reasons)
+    for r in reasons:                                                    # no neutral (no-data) reason in the top 5
+        assert not FL.is_missing_flag(r["feature"]) and r["value"] is not None and np.isfinite(r["value"])
+        assert r["sentence"].startswith(("Raises your risk", "Lowers your risk"))
+        assert r["family"] not in FL.EXCLUDED_FROM_REASONS
+    abs_sv = [abs(r["shap_value"]) for r in reasons]
+    assert abs_sv == sorted(abs_sv, reverse=True)
+    groups = [FL._GROUP_OF[f] for f in fams if f in FL._GROUP_OF]     # one per measure group: no contradiction
+    assert len(groups) == len(set(groups))
+    for n in out["data_notes"]:
+        assert n["sentence"].startswith("No data in this statement on:") and "risk" not in n["sentence"]
+        assert n["family"] not in fams
+
+
+def test_reasons_are_five_distinct_real_themes(toy_artifacts, raw_vendor):
+    out = _score(toy_artifacts, raw_vendor, requested_amount=5000, requested_term_days=14)
+    _reason_checks(out)
+    # the first reason is the largest |SHAP| among features that have data and may be reasons
+    bundle = joblib.load(toy_artifacts["model"])
+    used, cut, _, _ = P._used_transactions(raw_vendor)
+    med = out["inputs_used"]["scored_at"]
+    _, X = P._feature_frame(used, cut, med["requested_amount"], med["requested_term_days"], bundle["features"])
+    eligible = [abs(v) for n, v in out["explanation"]["shap_values"].items()
+                if not FL.is_missing_flag(n) and FL.family(n) not in FL.EXCLUDED_FROM_REASONS and not np.isnan(X.iloc[0][n])]
+    assert abs(out["top_reasons"][0]["shap_value"]) == max(eligible)
+
+
+def test_missing_data_gives_neutral_notes_not_reasons(toy_artifacts):
+    out = _score(toy_artifacts, toy.make_vendor(days=40))               # thin history: several features have no data
+    assert out["data_notes"], "a 40-day statement should leave some measures without data"
+    _reason_checks(out)
+
+
+# ---------------------------------------------------------------- the request does not move the score
+def test_score_does_not_depend_on_the_requested_loan(toy_artifacts, raw_vendor):
+    outs = [_score(toy_artifacts, raw_vendor, requested_amount=a, requested_term_days=t)
+            for a, t in ((1000, 7), (5000, 14), (20000, 30))]
+    for k in ("probability_of_default", "score", "tier", "pillar_ratings", "top_reasons", "data_notes", "explanation"):
+        assert outs[0][k] == outs[1][k] == outs[2][k], k                # exact
+    ref = toy_artifacts["reference"]
+    for o in outs:
+        assert o["inputs_used"]["scored_at"] == {"requested_amount": ref["requested_amount"]["median"],
+                                                 "requested_term_days": ref["requested_term_days"]["median"]}
+        assert "score_at_median_request" in [w["code"] for w in o["warnings"]]
+    assert [o["inputs_used"]["requested_amount"] for o in outs] == [max(1000.0, ref["requested_amount"]["p01"]), 5000.0,
+                                                                    min(20000.0, ref["requested_amount"]["p99"])]
+
+
+def test_score_is_the_model_at_the_median_request(toy_artifacts, raw_vendor):
+    out = _score(toy_artifacts, raw_vendor, requested_amount=9000, requested_term_days=28)
+    bundle = joblib.load(toy_artifacts["model"])
+    used, cut, _, _ = P._used_transactions(raw_vendor)
+    med = out["inputs_used"]["scored_at"]
+    _, X = P._feature_frame(used, cut, med["requested_amount"], med["requested_term_days"], bundle["features"])
+    assert out["probability_of_default"] == P._probability(X, bundle["model"])
+
+
+BAND_RANK = {"comfortable": 0, "stretched": 1, "heavy": 2}
+
+
+def test_affordability_never_improves_as_the_amount_rises(toy_artifacts, raw_vendor):
+    outs = [_score(toy_artifacts, raw_vendor, requested_amount=a, requested_term_days=14)["affordability"]
+            for a in [100, 500, 1000, 2500, 5000, 7500, 10000, 15000, 50000]]
+    for key in ("amount_to_income_30", "amount_to_avg_monthly_income_90"):
+        vals = [a[key] for a in outs]
+        assert all(b >= a for a, b in zip(vals, vals[1:])), key
+    ranks = [BAND_RANK[a["band"]] for a in outs]
+    assert all(b >= a for a, b in zip(ranks, ranks[1:]))
+    assert all(a["estimated_repayment"] == a["requested_amount"] for a in outs)
+    # the ratios are the features.build_row ratios for the request given
+    bundle = joblib.load(toy_artifacts["model"])
+    used, cut, _, _ = P._used_transactions(raw_vendor)
+    row, _ = P._feature_frame(used, cut, 7500, 14, bundle["features"])
+    a = _score(toy_artifacts, raw_vendor, requested_amount=7500, requested_term_days=14)["affordability"]
+    assert a["amount_to_income_30"] == row["amount_to_income_30"]
+    assert a["amount_to_avg_monthly_income_90"] == row["amount_to_avg_monthly_income_90"]
+
+
+def test_affordability_bands_follow_the_reference_cutoffs(toy_artifacts, raw_vendor):
+    cut = toy_artifacts["reference"]["affordability_bands"]
+    bands = set()
+    for amount in np.linspace(1, 10 ** 6, 400):
+        a = P._affordability({"history_days": 120.0, "income_total_30": 3000.0, "income_total_90": 9000.0}, float(amount),
+                             14.0, toy_artifacts["reference"])
+        r = a["amount_to_avg_monthly_income_90"]
+        expect = "comfortable" if r <= cut["p50"] else "stretched" if r <= cut["p85"] else "heavy"
+        assert a["band"] == expect
+        bands.add(a["band"])
+    assert bands == {"comfortable", "stretched", "heavy"}
+
+
+def test_affordability_unknown_without_income(toy_artifacts, raw_vendor):
+    no_income = toy.recompute_balance(raw_vendor[raw_vendor.paid_in == 0].reset_index(drop=True), opening=50000.0)
+    out = _score(toy_artifacts, no_income, requested_amount=5000, requested_term_days=14)
+    a = out["affordability"]
+    assert a["band"] == "unknown" and a["amount_to_avg_monthly_income_90"] is None and a["amount_to_income_30"] is None
+    json.dumps(out, allow_nan=False)
 
 
 def test_defaults_are_the_reference_medians(toy_artifacts, raw_vendor):
@@ -210,6 +306,89 @@ def test_stale_reference_is_refused(toy_artifacts, tmp_path):
         P.score_statement(toy.make_vendor(), model_path=toy_artifacts["model"], reference_path=str(tmp_path / "reference.json"))
 
 
+# ---------------------------------------------------------------- uploads (score_uploaded_file)
+NAMES = ("JANE WANJIKU", "PETER OTIENO", "MARY AKINYI", "JOHN KAMAU", "GRACE MUTUA", "DAVID OCHIENG")
+PHONES = ("254712345678", "0722987654", "254733111222", "0711222333", "254700999888", "0799123456")
+
+
+def _personal_statement(raw_vendor) -> pd.DataFrame:
+    """The toy statement in the M-Pesa sheet layout, with customer names and phone numbers in the details."""
+    sheet = raw_vendor.sort_values("completion_time", ascending=False).copy()
+    pay = sheet.details.str.startswith("Merchant Payment from")
+    k = sheet.loc[pay, "counterparty_id"].str[-1].astype(int) % len(NAMES)
+    sheet.loc[pay, "details"] = [f"Merchant Payment from {PHONES[i]} - {NAMES[i]}" for i in k]
+    sheet = sheet.rename(columns={"receipt_no": "Receipt No.", "completion_time": "Completion Time", "details": "Details",
+                                  "transaction_status": "Transaction Status", "paid_in": "Paid In",
+                                  "withdrawn": "Withdrawn", "balance": "Balance"})
+    return sheet[["Receipt No.", "Completion Time", "Details", "Transaction Status", "Paid In", "Withdrawn", "Balance"]]
+
+
+@pytest.fixture
+def upload_dir(tmp_path, monkeypatch):
+    """Point the temp folder at an empty directory and record every temporary file score_uploaded_file makes."""
+    d = tmp_path / "uploads"
+    d.mkdir()
+    monkeypatch.setattr(P.tempfile, "tempdir", str(d))
+    made = []
+    real = P.tempfile.mkstemp
+
+    def recording_mkstemp(*a, **kw):
+        fd, name = real(*a, **kw)
+        made.append(Path(name))
+        return fd, name
+    monkeypatch.setattr(P.tempfile, "mkstemp", recording_mkstemp)
+    return d, made
+
+
+def test_upload_is_deleted_after_success_and_holds_no_personal_data(toy_artifacts, raw_vendor, upload_dir, tmp_path):
+    d, made = upload_dir
+    sheet = _personal_statement(raw_vendor)
+    data = sheet.to_csv(index=False).encode("utf-8")
+    assert all(n.encode() in data for n in NAMES[:2]) and PHONES[0].encode() in data       # the input is personal
+    out = P.score_uploaded_file(data, "my statement.csv", requested_amount=5000, requested_term_days=14,
+                                model_path=toy_artifacts["model"], reference_path=toy_artifacts["ref"])
+    assert len(made) == 1 and made[0].parent == d and made[0].suffix == ".csv"
+    assert not made[0].exists() and not any(d.iterdir())                                       # deleted
+    # the same result as scoring the frame
+    direct = _score(toy_artifacts, raw_vendor, requested_amount=5000, requested_term_days=14)
+    assert out["probability_of_default"] == pytest.approx(direct["probability_of_default"], abs=1e-12)
+    text = json.dumps(out)
+    for name in NAMES:
+        for part in name.split():
+            assert part not in text.upper()
+    assert not re.search(r"(?<![\d.])\d{9,}", text), "a phone-like digit run is in the result"
+    assert "CP_" not in text and "Merchant Payment" not in text and "my statement" not in text
+    # xlsx bytes from a file object, too
+    xp = tmp_path / "s.xlsx"
+    sheet.to_excel(xp, index=False)
+    with open(xp, "rb") as fh:
+        out2 = P.score_uploaded_file(fh, "statement.xlsx", 5000, 14, model_path=toy_artifacts["model"],
+                                     reference_path=toy_artifacts["ref"])
+    assert out2["probability_of_default"] == pytest.approx(out["probability_of_default"], abs=1e-12)
+    assert len(made) == 2 and not any(d.iterdir())
+
+
+@pytest.mark.parametrize("content, filename, match", [
+    (b"Receipt No.,Completion Time,Details\nnot,a,statement\n", "statement.csv", "Columns not found"),
+    (b"\x00\x01 not a spreadsheet", "statement.xlsx", "."),
+    (b"%PDF-1.4 broken", "statement.pdf", "PDF"),
+])
+def test_upload_is_deleted_after_an_error(toy_artifacts, upload_dir, content, filename, match):
+    d, made = upload_dir
+    with pytest.raises(ValueError, match=match):
+        P.score_uploaded_file(content, filename, model_path=toy_artifacts["model"], reference_path=toy_artifacts["ref"])
+    assert len(made) == 1 and not made[0].exists() and not any(d.iterdir())
+
+
+def test_upload_rejects_unsupported_and_empty_files_without_writing(toy_artifacts, upload_dir):
+    d, made = upload_dir
+    with pytest.raises(ValueError, match="Excel"):
+        P.score_uploaded_file(b"abc", "statement.docx")
+    with pytest.raises(ValueError, match="empty"):
+        P.score_uploaded_file(b"", "statement.csv")
+    assert not made and not any(d.iterdir())
+
+
 # ---------------------------------------------------------------- full data (opt-in)
 def test_reproduces_stored_predictions_on_the_full_data():
     base = os.environ.get("CREDIT_DATA_DIR")
@@ -226,9 +405,19 @@ def test_reproduces_stored_predictions_on_the_full_data():
     pred = pd.read_parquet(need[1], columns=["application_id", "p_logistic"])
     sample = feat.sample(10, random_state=7).merge(pred, on="application_id")
     tx = pd.read_parquet(need[2], filters=[("vendor_id", "in", list(sample.vendor_id.unique()))])
+    bundle = joblib.load(need[3])
+    ref = json.loads(need[4].read_text())
     errors = []
     for r in sample.itertuples(index=False):
-        out = P.score_statement(tx[tx.vendor_id == r.vendor_id], r.requested_amount, r.requested_term_days, r.application_date,
+        g = tx[tx.vendor_id == r.vendor_id]
+        # the stored request, through the low-level steps (score_statement itself scores at the median request)
+        used, cut, _, _ = P._used_transactions(g, r.application_date)
+        _, X = P._feature_frame(used, cut, r.requested_amount, r.requested_term_days, bundle["features"])
+        errors.append(abs(P._probability(X, bundle["model"]) - r.p_logistic))
+        # score_statement = the same model at the median request, whatever request is passed
+        out = P.score_statement(g, r.requested_amount, r.requested_term_days, r.application_date,
                                 model_path=str(need[3]), reference_path=str(need[4]))
-        errors.append(abs(out["probability_of_default"] - r.p_logistic))
+        _, Xm = P._feature_frame(used, cut, ref["requested_amount"]["median"], ref["requested_term_days"]["median"],
+                                 bundle["features"])
+        assert out["probability_of_default"] == P._probability(Xm, bundle["model"])
     assert max(errors) < 1e-6, f"max error {max(errors):.2e}"

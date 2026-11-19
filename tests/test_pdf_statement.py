@@ -210,6 +210,12 @@ def test_pdf_without_text_raises_a_clear_error(tmp_path):
     c.save()
     with pytest.raises(PS.NoTextLayerError, match="no readable text"):
         PS.read_pdf_statement(p)
+    # the message tells the user what to do: ask for the Excel or CSV version (through the dispatcher too)
+    with pytest.raises(PS.NoTextLayerError) as e:
+        PS.read_statement(p)
+    msg = str(e.value)
+    assert "Please ask for the Excel (.xlsx) or CSV version of your M-Pesa statement" in msg
+    assert "scanned image" in msg and "OCR" in msg and "not supported" in msg
 
 
 def test_pdf_without_a_transaction_table_raises(tmp_path):

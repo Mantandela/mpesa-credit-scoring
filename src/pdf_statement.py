@@ -1,20 +1,26 @@
-"""Read an M-Pesa statement (PDF, xlsx or csv) into the transactions schema used by src/clean.py.
+"""Read an M-Pesa statement (xlsx or csv; PDF only with a text layer) into the transactions schema used by src/clean.py.
 
     read_pdf_statement(path, password=None) -> DataFrame
     read_statement(path, password=None)     -> DataFrame   (dispatches on .pdf / .xlsx / .xls / .csv)
+
+SUPPORTED INPUTS: Excel (.xlsx/.xls) and CSV statements. PDF only when it has a text layer. Real M-Pesa PDF statements
+are scanned images with no text layer (checked on two statements), so read_pdf_statement CANNOT read them; it raises
+NoTextLayerError, whose message asks the user for the Excel or CSV version. Reading images needs OCR, which is out of
+scope (future work). The PDF reader is validated only on generated text PDFs (tests/test_pdf_statement.py).
 
 Output columns, oldest first: the columns clean.read_real_statement returns (receipt_no, completion_time, details,
 transaction_status, paid_in, withdrawn, balance, vendor_id="REAL_STATEMENT") plus counterparty_id, which
 features.build_row needs and read_real_statement does not provide. Warnings (counts only) are in df.attrs["warnings"].
 
-Expected PDF layout (the Safaricom "M-PESA STATEMENT"): page 1 starts with customer details and a summary table, then a
+Assumed PDF layout for a text PDF (modelled on the Safaricom "M-PESA STATEMENT", not checked against an original with
+a text layer): page 1 starts with customer details and a summary table, then a
 "DETAILED STATEMENT" table with the columns Receipt No. | Completion Time | Details | Transaction Status | Paid In |
 Withdrawn | Balance. Rows are newest first, details may wrap onto following lines (top-aligned cells), the column
 header may repeat on every page, and each page may carry a header and a footer ("Page 1 of 9", disclaimer).
 The reader works from word positions (pdfplumber), not from ruled lines, so it also reads statements without a grid.
 
 A PDF without a text layer (scanned, or re-printed with "Microsoft Print to PDF", which turns text into shapes) cannot be
-read without OCR. The reader raises NoTextLayerError for those and asks for the original file or the Excel export.
+read without OCR. The reader raises NoTextLayerError for those and asks for the Excel or CSV version of the statement.
 
 Privacy: nothing in this module prints or logs statement content. Digit runs of 9 or more characters (phone, ID and
 account numbers, including partly starred ones such as 0722***123) are replaced by "*********" in details, and
@@ -41,6 +47,9 @@ _RECEIPT = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{8,12}$")       # some real receipts
 _AMOUNT = re.compile(r"^\(?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?-?$")
 _FOOTER = re.compile(r"^(page\s*\d+\s*(of\s*\d+)?|\d+\s*of\s*\d+|disclaimer\b.*)$", re.I)
 _HASH_SALT = "mpesa-credit-scoring/counterparty"
+NO_TEXT_MESSAGE = ("This PDF has no readable text: it is a scanned image (M-Pesa PDF statements usually are) or was "
+                   "re-printed, and reading images (OCR) is not supported. Please ask for the Excel (.xlsx) or CSV version "
+                   "of your M-Pesa statement and upload that instead.")
 
 
 class StatementError(ValueError):
@@ -300,8 +309,7 @@ def read_pdf_statement(path, password=None) -> pd.DataFrame:
     warnings = []
     with _open_pdf(path, password) as pdf:
         if not _has_text(pdf):
-            raise NoTextLayerError("This PDF has no readable text (it was scanned or re-printed, e.g. with 'Microsoft Print "
-                                   "to PDF'). Upload the original statement PDF from M-Pesa or the Excel export.")
+            raise NoTextLayerError(NO_TEXT_MESSAGE)
         rows = _rows_from_pdf(pdf, warnings)
     if not rows:
         raise StatementError("No transaction table (a header with 'Receipt No.' and 'Details') was found in the PDF.")
@@ -349,4 +357,4 @@ def read_statement(path, password=None) -> pd.DataFrame:
         except SystemExit as e:                                 # the reader stops with SystemExit; turn it into an error
             raise StatementError(str(e)) from None
         return _finish(df, list(df.attrs.get("warnings", [])))
-    raise StatementError(f"Unsupported file type '{ext}'. Use a PDF, Excel (.xlsx) or CSV statement.")
+    raise StatementError(f"Unsupported file type '{ext}'. Use the Excel (.xlsx) or CSV version of the M-Pesa statement.")

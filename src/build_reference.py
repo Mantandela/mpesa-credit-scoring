@@ -14,7 +14,10 @@ Contents of reference.json
   over ALL applications in features.parquet (the same population scorecard.py used), plus the mean (information only)
 - feature_medians: median of every model feature over the same population (used to say "high" or "low" in reasons)
 - pillar_distribution: 101 percentile points (0, 1, ..., 100) of each of the seven pillar scores over all applications
-- requested_amount / requested_term_days: median, 1st and 99th percentile (self-check defaults and clipping range)
+- requested_amount / requested_term_days: median, 1st and 99th percentile (the request the score is worked out at,
+  self-check defaults and clipping range)
+- affordability_bands: 50th and 85th percentile of amount_to_avg_monthly_income_90 over all applications with income
+  (cutoffs of the comfortable / stretched / heavy affordability band in predict.py)
 - background: how the SHAP background was drawn (TRAIN vendors from train_models.split_vendors, 200 rows, seed 42)
 
 Run from the repo root:  python src/build_reference.py
@@ -37,6 +40,7 @@ N_BACKGROUND = 200
 BACKGROUND_SEED = 42
 PERCENTILES = list(range(101))
 REQUEST_COLUMNS = ("requested_amount", "requested_term_days")
+BAND_FEATURE = "amount_to_avg_monthly_income_90"
 
 
 def build(feat: pd.DataFrame, features: list, split_seed: int = 42, n_background: int = N_BACKGROUND,
@@ -62,6 +66,9 @@ def build(feat: pd.DataFrame, features: list, split_seed: int = 42, n_background
     for c in REQUEST_COLUMNS:
         x = feat[c].astype(float)
         ref[c] = {"median": float(x.median()), "p01": float(x.quantile(0.01)), "p99": float(x.quantile(0.99))}
+    ratio = feat[BAND_FEATURE].astype(float).dropna()
+    ref["affordability_bands"] = {"feature": BAND_FEATURE, "p50": float(ratio.quantile(0.50)),
+                                  "p85": float(ratio.quantile(0.85)), "n": int(len(ratio))}
     assign = split_vendors(feat, split_seed)
     train = feat[feat.vendor_id.map(assign) == "train"]
     bg = train.sample(min(n_background, len(train)), random_state=background_seed)[features].reset_index(drop=True)
