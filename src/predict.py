@@ -13,7 +13,8 @@ clean.clean -> transactions before application_date -> features.build_row -> log
 The score, pillar ratings and reasons are worked out at the MEDIAN request from reference.json, whatever amount and
 term the caller passes: the trained model's coefficients on the request fields are not monotone, so scoring the
 caller's request could show a larger loan as less risky. The requested amount and term feed only the separate
-`affordability` block (ratios to income and a comfortable / stretched / heavy band, monotone by construction).
+`affordability` block (ratios to income and a comfortable / stretched / heavy band, monotone by construction), as
+typed: no clipping, only amounts and terms <= 0 are rejected.
 
 Needs models/logistic.joblib (src/train_models.py) and models/reference.json + models/shap_background.parquet
 (src/build_reference.py). All outcomes the model learned from are SIMULATED; see docs/scoring_function.md.
@@ -139,18 +140,20 @@ def _prepare(statement, password) -> tuple:
     return tx, warnings
 
 
-def _clip(name, value, rng, warnings):
-    lo, hi = rng["p01"], rng["p99"]
+def _request(name, value, rng, outside: dict) -> float:
+    """The request exactly as typed (the training median when not given). No clipping: the model never sees it, it
+    feeds only the affordability block. Must be a positive number; a value outside the 1st-99th percentile of the
+    simulated requests is recorded in `outside` for an information warning."""
     if value is None:
         return float(rng["median"])
-    v = float(value)
-    if not math.isfinite(v):
-        raise ValueError(f"{name} must be a number")
-    if v < lo or v > hi:
-        c = min(max(v, lo), hi)
-        warnings.append({"code": f"{name}_clipped", "message": f"{name} {v:g} is outside the range seen in training "
-                         f"({lo:g} to {hi:g}); scored as {c:g}.", "entered": v, "used": c})
-        return c
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number.") from None
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError(f"{name} must be a number greater than 0.")
+    if v < rng["p01"] or v > rng["p99"]:
+        outside[name] = {"entered": v, "p01": float(rng["p01"]), "p99": float(rng["p99"])}
     return v
 
 
@@ -223,13 +226,19 @@ def score_statement(statement, requested_amount=None, requested_term_days=None, 
                     model_path="models/logistic.joblib", reference_path="models/reference.json", password=None) -> dict:
     bundle, ref, explainer, names = _models(model_path, reference_path)
     F = list(bundle["features"])
+    # The request the caller gave is used, as typed, for the affordability block only. The score is worked out at the
+    # median request, because the trained model's coefficients on the request fields are not monotone (a larger
+    # request could lower the predicted risk). Checked before the statement is read.
+    outside = {}
+    amount = _request("requested_amount", requested_amount, ref["requested_amount"], outside)
+    term = _request("requested_term_days", requested_term_days, ref["requested_term_days"], outside)
     used, cut, ignored, warnings = _used_transactions(statement, application_date, password)
-
-    # The request the caller gave is used for the affordability block only. The score is worked out at the median
-    # request, because the trained model's coefficients on the request fields are not monotone (a larger request
-    # could lower the predicted risk).
-    amount = _clip("requested_amount", requested_amount, ref["requested_amount"], warnings)
-    term = _clip("requested_term_days", requested_term_days, ref["requested_term_days"], warnings)
+    if outside:
+        what = " and ".join("amount" if k == "requested_amount" else "term" for k in outside)
+        warnings.append({"code": "request_outside_training_range", "fields": outside,
+                         "message": f"The requested {what} is outside the range of the simulated loan requests "
+                                    "(1st to 99th percentile). The affordability block uses it as entered; the band is "
+                                    "relative to simulated requests. The score does not use the request."})
     med_amount, med_term = float(ref["requested_amount"]["median"]), float(ref["requested_term_days"]["median"])
     row, X = _feature_frame(used, cut, med_amount, med_term, F)
     warnings.append({"code": "score_at_median_request",

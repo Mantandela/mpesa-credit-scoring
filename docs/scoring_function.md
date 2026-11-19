@@ -20,8 +20,8 @@ from predict import score_statement, score_uploaded_file, warm_up
 warm_up()                                   # optional, at start-up: importing shap takes about 4 seconds
 result = score_statement(
     statement,                              # DataFrame of raw transactions, or a path to .xlsx / .xls / .csv
-    requested_amount=5000,                  # KES; used ONLY for the affordability block; default = median (5,000); clipped to 1,300-10,000
-    requested_term_days=14,                 # used ONLY for the affordability block; default = median (19); clipped to 7-30
+    requested_amount=5000,                  # KES; used ONLY for the affordability block, as typed (no clipping); default = median (5,000); must be > 0
+    requested_term_days=14,                 # used ONLY for the affordability block, as typed; default = median (19); must be > 0
     application_date="2026-03-15",          # default = the day after the last transaction
     model_path="models/logistic.joblib",
     reference_path="models/reference.json",
@@ -59,7 +59,8 @@ Retraining is out of scope, so:
 - the probability of default, score, tier, pillar ratings and reasons are always worked out at the **median request**
   in `reference.json` (KES 5,000 for 19 days), whatever the caller passes. They describe the vendor, not the slider.
   `inputs_used.scored_at` shows the request used and the warning `score_at_median_request` says so.
-- the requested amount and term (after clipping) feed the separate **`affordability`** block. It holds the same
+- the requested amount and term, **exactly as typed** (no clipping, since the model never sees them; only values
+  <= 0 are rejected with a `ValueError`), feed the separate **`affordability`** block. It holds the same
   ratios as the features (`amount_to_income_30`, `amount_to_avg_monthly_income_90`) and an estimated repayment (the
   amount only; fees and interest are not modelled). It also gives a band on `amount_to_avg_monthly_income_90`, with
   cutoffs at the 50th and 85th percentile of the 2,244 simulated applications. The bands are **comfortable** (at or
@@ -119,8 +120,8 @@ Retraining is out of scope, so:
 }
 ```
 
-For this vendor, KES 1,000 to 7,500 is "comfortable" and KES 10,000 is "stretched". A request above 10,000 is clipped to
-10,000 (with a warning), so it is also "stretched". The PD is 0.1244 at every amount.
+For this vendor (about KES 164,000 of customer income a month), KES 1,000 to 7,500 is "comfortable", KES 10,000 is
+"stretched" and KES 200,000 is "heavy" (1.22 times monthly income). The PD is 0.1244 at every amount.
 
 - `pillar_ratings.rating`: percentile of the vendor's pillar score among the 2,244 simulated applications, flipped so
   100 = best. Weak < 25 <= Fair < 50 <= Good < 75 <= Strong. Worked out at the median request.
@@ -139,7 +140,9 @@ For this vendor, KES 1,000 to 7,500 is "comfortable" and KES 10,000 is "stretche
 - `warnings` (each has a `code`):
   - `score_at_median_request` (always present);
   - `thin_history` (fewer than 90 days before the application date);
-  - `requested_amount_clipped` / `requested_term_days_clipped`;
+  - `request_outside_training_range` (information only: the amount or term is outside the 1st to 99th percentile of
+    the simulated requests, KES 1,300 to 10,000 and 7 to 30 days; it is used as typed and the band is relative to
+    simulated requests; `fields` holds the entered value and the range);
   - `integrity_flags` (counts of rows that broke a `clean.py` check, only rows actually used);
   - `unparsed_rows` (rows whose time or balance could not be read; they are skipped but always counted);
   - reader notes: `skipped_non_transaction_rows` (with a breakdown of repeated headers, blank rows and footers),
@@ -183,7 +186,9 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
 - **Reasons explain the model, not causes.** Grouping families and measure groups removes the obvious
   contradictions, but a reason can still look odd. In the example above, having most income left after payments
   raises risk, because the coefficient carries the effect of correlated features.
-- **Clipping hides large requests.** A request above KES 10,000 is assessed as 10,000 in the affordability block
-  (with a warning).
+- **Requests outside the simulated range.** The simulated loans run from KES 1,300 to 10,000 (1st to 99th
+  percentile). A larger request is assessed as typed in the affordability block (so it can reach "heavy"), with the
+  information warning `request_outside_training_range`; the band then compares it with simulated requests it is far
+  from, and the score itself never reflects the request.
 - **PDF input.** The PDF reader is validated only on generated text PDFs. Real M-Pesa PDF statements are scanned
   images and are rejected with a message asking for the Excel or CSV version; OCR is future work.

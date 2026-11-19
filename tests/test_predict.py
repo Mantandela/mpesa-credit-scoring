@@ -172,8 +172,7 @@ def test_score_does_not_depend_on_the_requested_loan(toy_artifacts, raw_vendor):
         assert o["inputs_used"]["scored_at"] == {"requested_amount": ref["requested_amount"]["median"],
                                                  "requested_term_days": ref["requested_term_days"]["median"]}
         assert "score_at_median_request" in [w["code"] for w in o["warnings"]]
-    assert [o["inputs_used"]["requested_amount"] for o in outs] == [max(1000.0, ref["requested_amount"]["p01"]), 5000.0,
-                                                                    min(20000.0, ref["requested_amount"]["p99"])]
+    assert [o["inputs_used"]["requested_amount"] for o in outs] == [1000.0, 5000.0, 20000.0]       # as typed
 
 
 def test_score_is_the_model_at_the_median_request(toy_artifacts, raw_vendor):
@@ -190,7 +189,7 @@ BAND_RANK = {"comfortable": 0, "stretched": 1, "heavy": 2}
 
 def test_affordability_never_improves_as_the_amount_rises(toy_artifacts, raw_vendor):
     outs = [_score(toy_artifacts, raw_vendor, requested_amount=a, requested_term_days=14)["affordability"]
-            for a in [100, 500, 1000, 2500, 5000, 7500, 10000, 15000, 50000]]
+            for a in [100, 500, 1000, 2500, 5000, 7500, 10000, 15000, 50000, 200000, 10 ** 7]]
     for key in ("amount_to_income_30", "amount_to_avg_monthly_income_90"):
         vals = [a[key] for a in outs]
         assert all(b >= a for a, b in zip(vals, vals[1:])), key
@@ -219,6 +218,28 @@ def test_affordability_bands_follow_the_reference_cutoffs(toy_artifacts, raw_ven
     assert bands == {"comfortable", "stretched", "heavy"}
 
 
+REAL_BANDS = {"feature": "amount_to_avg_monthly_income_90", "p50": 0.056367105686659244, "p85": 0.41940241208515233}
+
+
+def test_a_large_raw_request_reaches_heavy(toy_artifacts, tmp_path):
+    """200,000 against about 164,000 a month is heavy with the trained reference cutoffs (not clipped to the
+    training range first). The toy reference is copied with the real cutoffs so the test needs no data."""
+    ref = dict(toy_artifacts["reference"], affordability_bands=REAL_BANDS)
+    (tmp_path / "reference.json").write_text(json.dumps(ref))
+    pd.read_parquet(Path(toy_artifacts["ref"]).with_name("shap_background.parquet")).to_parquet(tmp_path / "shap_background.parquet")
+    vendor = toy.make_vendor(days=120, daily_in=164000 / 30)
+    out = P.score_statement(vendor, 200000, 30, model_path=toy_artifacts["model"], reference_path=str(tmp_path / "reference.json"))
+    a = out["affordability"]
+    assert a["requested_amount"] == 200000.0 and a["estimated_repayment"] == 200000.0
+    assert a["amount_to_avg_monthly_income_90"] == pytest.approx(200000 / 164000, rel=1e-9)
+    assert a["band"] == "heavy"
+    codes = [w["code"] for w in out["warnings"]]
+    assert "request_outside_training_range" in codes and not any(c.endswith("_clipped") for c in codes)
+    small = P.score_statement(vendor, 5000, 14, model_path=toy_artifacts["model"], reference_path=str(tmp_path / "reference.json"))
+    assert small["affordability"]["band"] == "comfortable"
+    assert small["probability_of_default"] == out["probability_of_default"]
+
+
 def test_affordability_unknown_without_income(toy_artifacts, raw_vendor):
     no_income = toy.recompute_balance(raw_vendor[raw_vendor.paid_in == 0].reset_index(drop=True), opening=50000.0)
     out = _score(toy_artifacts, no_income, requested_amount=5000, requested_term_days=14)
@@ -245,15 +266,22 @@ def test_thin_history_warning(toy_artifacts):
     assert "thin_history" not in [w["code"] for w in long["warnings"]]
 
 
-def test_inputs_outside_the_training_range_are_clipped_with_a_warning(toy_artifacts, raw_vendor):
+def test_requests_outside_the_training_range_are_used_as_typed_with_a_note(toy_artifacts, raw_vendor):
     ref = toy_artifacts["reference"]
     out = _score(toy_artifacts, raw_vendor, requested_amount=10 ** 7, requested_term_days=1)
-    codes = [w["code"] for w in out["warnings"]]
-    assert "requested_amount_clipped" in codes and "requested_term_days_clipped" in codes
-    assert out["inputs_used"]["requested_amount"] == ref["requested_amount"]["p99"]
-    assert out["inputs_used"]["requested_term_days"] == ref["requested_term_days"]["p01"]
+    w = next(w for w in out["warnings"] if w["code"] == "request_outside_training_range")
+    assert set(w["fields"]) == {"requested_amount", "requested_term_days"} and "relative to simulated" in w["message"]
+    assert not any(x["code"].endswith("_clipped") for x in out["warnings"])
+    assert out["inputs_used"]["requested_amount"] == 10 ** 7 and out["inputs_used"]["requested_term_days"] == 1
+    assert out["affordability"]["requested_amount"] == 10 ** 7
     inside = _score(toy_artifacts, raw_vendor, requested_amount=ref["requested_amount"]["median"], requested_term_days=14)
-    assert not any(w["code"].endswith("_clipped") for w in inside["warnings"])
+    assert "request_outside_training_range" not in [x["code"] for x in inside["warnings"]]
+
+
+@pytest.mark.parametrize("amount, term", [(0, 14), (-500, 14), (5000, 0), (5000, -3), (float("nan"), 14), ("abc", 14)])
+def test_non_positive_or_invalid_requests_raise(toy_artifacts, raw_vendor, amount, term):
+    with pytest.raises(ValueError, match="must be a number"):
+        _score(toy_artifacts, raw_vendor, requested_amount=amount, requested_term_days=term)
 
 
 def test_no_usable_transactions_raises_a_clear_error(toy_artifacts, raw_vendor):
