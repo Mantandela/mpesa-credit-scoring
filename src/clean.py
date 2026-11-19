@@ -91,19 +91,68 @@ def read_real_statement(path) -> pd.DataFrame:
         raise SystemExit(f"Columns not found: {sorted(missing)}. Found: {list(df.columns)}")
     if "transaction_status" not in df:
         df["transaction_status"] = "Completed"
+    text = df.fillna("").astype(str).apply(lambda c: c.str.strip())       # the cells as read, to account for skipped rows
     for c in ("paid_in", "withdrawn", "balance"):
         df[c] = pd.to_numeric(df[c].astype(str).str.replace(r"[,\s]", "", regex=True), errors="coerce")
+    bad_amount = sum(((text[c] != "") & df[c].isna()) for c in ("paid_in", "withdrawn")).astype(bool)
     df["paid_in"] = df["paid_in"].fillna(0.0)
     df["withdrawn"] = df["withdrawn"].fillna(0.0).abs()
     t = pd.to_datetime(df["completion_time"], errors="coerce")
     if t.isna().mean() > 0.5:
-        t = pd.to_datetime(df["completion_time"], errors="coerce", dayfirst=True)
+        # Try ISO 8601 (YYYY-MM-DD ...) before day-first: with dayfirst=True pandas can infer %Y-%d-%m from an ISO value
+        # and swap day and month for every date with a day of 12 or less.
+        iso = pd.to_datetime(df["completion_time"], errors="coerce", format="ISO8601")
+        t = iso if iso.isna().mean() <= 0.5 else pd.to_datetime(df["completion_time"], errors="coerce", dayfirst=True)
+    # Excel cells read as text can mix 'HH:MM:SS' and 'HH:MM:SS.ffffff'. pandas infers one format from the first value
+    # and turns the rest into NaT, which then silently dropped most of a real statement. Retry only those rows as ISO 8601.
+    retry = t.isna() & df["completion_time"].notna()
+    if retry.any():
+        t = t.copy()
+        t[retry] = pd.to_datetime(df.loc[retry, "completion_time"], errors="coerce", format="ISO8601")
     df["completion_time"] = t
-    df = df.dropna(subset=["completion_time", "balance"]).reset_index(drop=True)
+    keep = df["completion_time"].notna() & df["balance"].notna()
+    report = skipped_row_report(text, keep, bad_amount)
+    df = df[keep].reset_index(drop=True)
     if len(df) > 1 and df.completion_time.iloc[0] > df.completion_time.iloc[-1]:
         df = df.iloc[::-1].reset_index(drop=True)          # newest first -> oldest first
     df["vendor_id"] = "REAL_STATEMENT"
+    df.attrs["warnings"] = report
     return df
+
+
+_RECEIPT_LIKE = r"^(?=.*[A-Z])[A-Z0-9]{8,12}$"           # some real receipts are letters only
+
+
+def skipped_row_report(text: pd.DataFrame, keep: pd.Series, bad_amount: pd.Series) -> list:
+    """Account for every row read_real_statement does not return (counts only, never content).
+
+    Repeated column headers, blank rows and text-only rows (page footers, disclaimers) are expected and reported as
+    information. A row that looks like a transaction (receipt-like number, or a time or balance cell) but whose time or
+    balance could not be parsed is reported as 'unparsed_rows' and also raised as a UserWarning, so it is never lost
+    silently. Amount cells that are not numbers (read as 0) are reported as 'unparsed_amounts'."""
+    import warnings as _w
+    blank = (text == "").all(axis=1)
+    header = text["receipt_no"].str.lower().str.startswith("receipt")
+    tx_like = ~blank & ~header & (text["receipt_no"].str.match(_RECEIPT_LIKE) | (text["completion_time"] != "")
+                                  | (text["balance"] != ""))
+    dropped = ~keep
+    out = []
+    n_bad = int((dropped & tx_like).sum())
+    if n_bad:
+        msg = f"{n_bad} rows look like transactions but their time or balance could not be read; they were skipped."
+        out.append({"code": "unparsed_rows", "count": n_bad, "message": msg})
+        _w.warn(f"read_real_statement: {msg}", UserWarning, stacklevel=3)
+    n_amt = int((keep & bad_amount).sum())
+    if n_amt:
+        out.append({"code": "unparsed_amounts", "count": n_amt,
+                    "message": f"{n_amt} rows had a paid-in or withdrawn cell that is not a number; it was read as 0."})
+        _w.warn(f"read_real_statement: {out[-1]['message']}", UserWarning, stacklevel=3)
+    other = {"header_repeats": int((dropped & header).sum()), "blank": int((dropped & blank).sum()),
+             "text_only": int((dropped & ~blank & ~header & ~tx_like).sum())}
+    if any(other.values()):
+        out.append({"code": "skipped_non_transaction_rows", "count": sum(other.values()), "breakdown": other,
+                    "message": "Rows that are not transactions (repeated headers, blank rows, footers) were skipped."})
+    return out
 
 
 def save(df, folder, name):
@@ -256,7 +305,10 @@ def main():
         # Real data: keep every output inside the git-ignored private folder
         a.out = "data/private"
         a.report = "data/private/cleaning_report_statement.md"
-        tx = clean(read_real_statement(a.statement), a.as_of)
+        raw = read_real_statement(a.statement)
+        for w in raw.attrs.get("warnings", []):              # counts only
+            print(f"note ({w['code']}): {w['message']}" + (f" {w['breakdown']}" if "breakdown" in w else ""))
+        tx = clean(raw, a.as_of)
         p = save(tx, a.out, "statement_clean")
         txt = report(tx)
     else:
