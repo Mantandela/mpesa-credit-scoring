@@ -14,8 +14,29 @@ LABEL_COLUMNS = ["scorecard_score", "scorecard_p", "hidden_shock", "latent_risk"
                  "fuliza_max_lag_days", "window_complete", "repayment_status", "late_or_default"]
 
 
-def pillar_scores(feat: pd.DataFrame) -> pd.DataFrame:
-    """One column per pillar: average of direction x clipped z-score of its features."""
+def scorecard_features() -> list:
+    """Every feature used by a pillar, in pillar order, without repeats."""
+    return list(dict.fromkeys(f for members in C.SCORECARD_PILLARS.values() for f in members))
+
+
+def feature_stats(feat: pd.DataFrame, columns=None) -> dict:
+    """{feature: {"median", "std", "mean"}} over `feat`. median and std (ddof=0) are what pillar_scores standardises with;
+    mean is stored for information only. Default columns: the scorecard features."""
+    out = {}
+    for f in columns if columns is not None else scorecard_features():
+        if f not in feat.columns:
+            raise SystemExit(f"scorecard feature missing from the features table: {f}")
+        x = feat[f].astype(float)
+        out[f] = {"median": float(x.median()), "std": float(x.std(ddof=0)), "mean": float(x.mean())}
+    return out
+
+
+def pillar_scores(feat: pd.DataFrame, stats: dict = None) -> pd.DataFrame:
+    """One column per pillar: average of direction x clipped z-score of its features.
+
+    stats=None (the default) standardises with the median and std of `feat` itself, as always. Passing `stats`
+    (from feature_stats on a reference population) standardises with those instead, so a single new application can
+    be placed on the same scale as the population the scorecard was built on."""
     out = {}
     for pillar, members in C.SCORECARD_PILLARS.items():
         cols = []
@@ -23,8 +44,8 @@ def pillar_scores(feat: pd.DataFrame) -> pd.DataFrame:
             if f not in feat.columns:
                 raise SystemExit(f"scorecard feature missing from the features table: {f}")
             x = feat[f].astype(float)
-            sd = x.std(ddof=0)
-            z = (x - x.median()) / sd if sd and not np.isnan(sd) else x * 0.0
+            med, sd = (stats[f]["median"], stats[f]["std"]) if stats is not None else (x.median(), x.std(ddof=0))
+            z = (x - med) / sd if sd and not np.isnan(sd) else x * 0.0
             cols.append(direction * z.fillna(0.0).clip(-C.SCORE_CLIP, C.SCORE_CLIP))
         out[pillar] = pd.concat(cols, axis=1).mean(axis=1)
     return pd.DataFrame(out, index=feat.index)
