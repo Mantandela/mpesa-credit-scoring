@@ -59,6 +59,21 @@ def test_schema_is_created_with_the_agreed_columns_and_indexes(engine, conn):
     assert db.table_columns(engine, "users")[0] == "id"
 
 
+def test_an_up_to_date_schema_has_no_problems(engine):
+    assert db.schema_problems(engine) == []
+
+
+def test_an_old_schema_is_detected(engine, conn):
+    """A database created before the eligibility columns: create_all does not add columns, the check reports them."""
+    with db.transaction(conn):
+        conn.exec_driver_sql("ALTER TABLE score_checks DROP COLUMN max_amount")
+        conn.exec_driver_sql("ALTER TABLE score_checks DROP COLUMN comfortable_amount")
+    db.create_schema(engine)                                           # what start-up does: no error, no repair
+    assert db.schema_problems(engine) == ["score_checks.max_amount", "score_checks.comfortable_amount"]
+    assert db.schema_problems(conn) == ["score_checks.max_amount", "score_checks.comfortable_amount"]
+    assert db.SCHEMA_OUT_OF_DATE == "Database schema out of date. See docs/database.md."
+
+
 def test_sqlite_is_the_default_and_urls_are_normalised(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("APP_DB_PATH", str(tmp_path / "x" / "app.db"))

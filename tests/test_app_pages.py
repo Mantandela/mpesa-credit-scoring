@@ -3,6 +3,7 @@
 AppTest cannot drive the file uploader, so the end-to-end test scores the synthetic statement through the service
 (exactly what the Score screen calls) and continues in the app from the Result screen.
 """
+import logging
 import re
 
 import pytest
@@ -10,7 +11,7 @@ from streamlit.testing.v1 import AppTest
 
 import app_helpers as H
 import toy
-from app import auth, components, db, service, theme
+from app import auth, components, db, errors, service, theme
 
 PW = "correct-horse-1"
 MAIN = str(H.ROOT / "app" / "main.py")
@@ -223,7 +224,7 @@ def test_vendor_journey(env):
     at.button(key="to_reasons").click().run()
     _no_errors(at)
     med = service.median_request()
-    assert at.slider(key="loan_amount").value == int(med[0])
+    assert at.slider(key="loan_amount").value == 9200          # starts at the comfortable amount when known
     before = _text(at)
     assert all(r["phrase"] in before for r in result["reasons"]) and "Test an amount" in before
     assert "Up to KES 34,300" in before
@@ -241,7 +242,8 @@ def test_vendor_journey(env):
     radio = at.radio(key="apply_lender")
     assert sorted(radio.options) == ["Tumaini Microfinance", "Umoja SACCO"]       # organisation names are shown
     assert (at.number_input(key="apply_amount_in").value, at.number_input(key="apply_term_in").value) == \
-        (int(med[0]), int(med[1]))
+        (9200, int(med[1]))                                    # amount prefilled with the comfortable amount
+    assert "Your estimated limit: Up to KES 34,300" in _text(at) and "Comfortable up to KES 9,200" in _text(at)
     assert len(at.get("file_uploader")) == 1
     assert at.checkbox(key="apply_consent").label == "Share this summary with the lender"
     send = at.button(key="send_application")
@@ -317,6 +319,74 @@ def test_apply_outcome_lines(env, msg, shown, see_why):
 def test_apply_page_never_keeps_the_statement():
     src = (H.ROOT / "app" / "pages" / "apply.py").read_text(encoding="utf-8")
     assert "apply_upload_n" in src and src.count('st.session_state["apply_upload_n"] = n + 1') >= 2
+
+
+def test_apply_without_a_known_limit_uses_the_median_request(env):
+    at = _app(user_id=env["vendor"]["id"], page="apply")       # no score yet
+    _no_errors(at)
+    assert "Your estimated limit" not in _text(at)
+    assert at.number_input(key="apply_amount_in").value == int(service.median_request()[0])
+
+
+def test_apply_and_reasons_with_a_very_high_result_fall_back_to_the_median(env):
+    result = _score(env, env["vendor"])                        # Very high risk: no comfortable amount
+    at = _app(user_id=env["vendor"]["id"], page="apply", result=result)
+    _no_errors(at)
+    assert "Your estimated limit: Not eligible right now" in _text(at)
+    assert at.number_input(key="apply_amount_in").value == int(service.median_request()[0])
+    at = _app(user_id=env["vendor"]["id"], page="reasons", result=result)
+    assert at.slider(key="loan_amount").value == int(service.median_request()[0])
+
+
+# ---------------------------------------------------------------- errors
+SECRET = "cell JANE WANJIKU 0722987654 SELECT * FROM score_checks"
+
+
+def test_an_unexpected_error_shows_a_card_and_logs_only_class_location_and_id(env, monkeypatch, caplog):
+    def boom(*a, **kw):
+        raise RuntimeError(SECRET)
+    monkeypatch.setattr(service, "list_applications", boom)
+    caplog.set_level(logging.INFO, logger=errors.LOGGER_NAME)
+    at = _app(user_id=env["vendor"]["id"], page="home")
+    assert not at.exception                                    # handled, not shown as a traceback
+    text = _text(at)
+    assert "Something went wrong. Please try again." in text and at.button(key="error_home").label == "Back to Home"
+    assert "Business health" not in text and "Latest applications" not in text   # the half-drawn page is cleared
+    records = [r for r in caplog.records if r.name == errors.LOGGER_NAME]
+    assert len(records) == 1
+    line = records[0].getMessage()
+    m = re.fullmatch(r"incident=([0-9A-F]{6}) RuntimeError at app\.pages\.home:render:\d+", line)
+    assert m, line
+    assert f"Incident {m.group(1)}" in text                    # the same id on screen
+    assert records[0].exc_info is None and records[0].stack_info is None
+    for part in ("JANE", "0722987654", "cell", "SELECT", "score_checks"):
+        assert part not in line and part not in text
+    at.button(key="error_home").click().run()
+    assert at.session_state["page"] == "home"
+
+
+def test_a_score_that_could_not_be_saved_is_still_shown(env):
+    result = dict(_score(env, env["vendor"], RICH), check_id=None, save_error=service.MSG_DB_SAVE)
+    at = _app(user_id=env["vendor"]["id"], page="result", result=result)
+    _no_errors(at)
+    text = _text(at)
+    assert f"{result['score']} <span>/ 850</span>" in text and "Up to KES 34,300" in text
+    assert "Could not save your result. Please try again." in text
+
+
+def test_an_out_of_date_schema_shows_a_card_and_one_log_line(env, caplog):
+    with db.transaction(env["conn"]):
+        env["conn"].exec_driver_sql("ALTER TABLE score_checks DROP COLUMN max_amount")
+        env["conn"].exec_driver_sql("ALTER TABLE score_checks DROP COLUMN comfortable_amount")
+    caplog.set_level(logging.INFO, logger=errors.LOGGER_NAME)
+    for page in ("signin", "home"):
+        at = _app(user_id=env["vendor"]["id"], page=page)
+        _no_errors(at)
+        assert "Database schema out of date. See docs/database.md." in _text(at)
+        assert not [b for b in at.button if b.key.startswith(("nav_", "signin_"))]   # no page behind it
+    lines = [r.getMessage() for r in caplog.records if r.name == errors.LOGGER_NAME]
+    assert lines == ["Database schema out of date. See docs/database.md. Missing: score_checks.max_amount, "
+                     "score_checks.comfortable_amount"]                              # once, at start-up
 
 
 # ---------------------------------------------------------------- design rules

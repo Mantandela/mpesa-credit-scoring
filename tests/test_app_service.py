@@ -333,6 +333,62 @@ def test_scanned_pdf_gets_the_friendly_message(env, tmp_path, temp_files):
     assert len(made) == 2 and not any(d.iterdir())
 
 
+@pytest.mark.parametrize("raised, message", [
+    (ValueError("No usable transactions before the application date 2026-01-01."), service.MSG_TOO_SHORT),
+    (ValueError("The statement has no transactions."), service.MSG_TOO_SHORT),
+    (ValueError("could not convert 'JANE' to float"), service.MSG_UNREADABLE),
+    (FileNotFoundError("models/logistic.joblib"), service.MSG_NO_MODEL),
+    (ImportError("shap"), service.MSG_NO_MODEL),
+    (KeyError("Details"), service.MSG_UNREADABLE),
+])
+def test_every_scoring_failure_maps_to_a_fixed_message(env, monkeypatch, raised, message):
+    def fail(*a, **kw):
+        raise raised
+    monkeypatch.setattr(P, "score_uploaded_file", fail)
+    for call in (lambda: _check(env, b"x,y\n"), lambda: _submit(env, b"x,y\n")):
+        with pytest.raises(service.UserError) as e:
+            call()
+        assert str(e.value) == message and e.value.__cause__ is None
+
+
+def test_model_not_ready_has_its_own_message(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_MODEL_PATH", str(tmp_path / "missing.joblib"))
+    with pytest.raises(service.UserError, match="scoring engine is still starting"):
+        _check(env, b"x,y\n")
+
+
+def _drop_eligibility_columns(conn):
+    """Turn the database into the schema of the previous version (score_checks without the eligibility columns)."""
+    with db.transaction(conn):
+        conn.exec_driver_sql("ALTER TABLE score_checks DROP COLUMN max_amount")
+        conn.exec_driver_sql("ALTER TABLE score_checks DROP COLUMN comfortable_amount")
+
+
+def test_a_database_error_while_saving_keeps_the_score(env, rich_bytes):
+    _drop_eligibility_columns(env["conn"])                       # the insert now fails, as on an old database
+    s = _check(env, rich_bytes)
+    assert 300 <= s["score"] <= 850 and s["eligibility"]["max_amount"] == 34300   # the computed score is kept
+    assert s["check_id"] is None and s["save_error"] == service.MSG_DB_SAVE
+    assert env["conn"].exec_driver_sql("SELECT COUNT(*) FROM score_checks").scalar() == 0
+    assert db.count(env["conn"], "audit_log", action="score_check") == 0          # rolled back together
+
+
+def test_a_saved_score_has_no_save_error(env, rich_bytes):
+    assert _check(env, rich_bytes)["save_error"] is None
+
+
+def test_a_database_error_while_sending_is_a_fixed_message(env, rich_bytes, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    def fail(*a, **kw):
+        raise OperationalError("INSERT INTO applications ...", {"snapshot_json": "secret"}, Exception("JANE"))
+    monkeypatch.setattr(service, "_insert_application", fail)
+    with pytest.raises(service.UserError) as e:
+        _submit(env, rich_bytes)
+    assert str(e.value) == service.MSG_DB_APPLY and e.value.__cause__ is None
+    assert db.count(env["conn"], "applications") == 0
+
+
 def test_unexpected_reader_errors_never_leak_their_text(env, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("cell value JANE WANJIKU 0722987654")

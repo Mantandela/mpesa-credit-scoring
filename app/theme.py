@@ -114,6 +114,7 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 .elig-max { font-size: 28px; font-weight: 700; color: #1D1B3A; line-height: 1.2; }
 .elig-comf { font-size: 15px; color: #1D1B3A; margin-top: 2px; }
 .elig-no { font-size: 18px; line-height: 1.3; }
+.limit-line { font-size: 16px; font-weight: 700; color: #1D1B3A; }
 
 /* ---------- top bar ---------- */
 .st-key-topbar { align-items: center; gap: 12px !important; flex-wrap: nowrap !important; }

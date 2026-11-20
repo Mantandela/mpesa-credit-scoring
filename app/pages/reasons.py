@@ -5,7 +5,7 @@ from html import escape
 import streamlit as st
 
 from app import components as ui, service
-from app.pages import current_result
+from app.pages import comfortable_amount, current_result
 
 SLIDER_MIN, SLIDER_MAX, SLIDER_STEP = 1000, 150000, 500
 
@@ -23,7 +23,8 @@ def render(conn, user) -> None:
         if result["data_notes"]:
             ui.html(f'<div class="muted">No data in this statement on: {escape(", ".join(result["data_notes"]))}</div>')
 
-    requested = float(result["request_amount"])
+    # start at the estimated comfortable amount when known, else at the request the score used (the median request)
+    requested = float(comfortable_amount(result) or result["request_amount"])
     top = max(SLIDER_MAX, int(requested))
     start = int(min(max(requested, SLIDER_MIN), top))
     amount = st.session_state.get("loan_amount", start)

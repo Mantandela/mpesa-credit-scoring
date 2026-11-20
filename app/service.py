@@ -25,6 +25,7 @@ import threading
 from pathlib import Path
 
 from sqlalchemy import delete, insert, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "src") not in sys.path:
@@ -65,9 +66,12 @@ MSG_EMPTY = "The file is empty."
 MSG_NO_TEXT_PDF = "This PDF has no selectable text. Please upload the Excel or CSV statement."
 MSG_PDF_PASSWORD = "This PDF is password protected. Please upload the Excel or CSV statement."
 MSG_UNREADABLE = "We could not read this statement. Please upload the Excel or CSV statement from M-Pesa."
-MSG_NO_TRANSACTIONS = "We found no transactions we could use in this statement."
-MSG_NO_MODEL = "Scoring is not available right now."
+MSG_TOO_SHORT = "This statement is too short or has no transactions we can use. Please upload a longer statement."
+MSG_NO_MODEL = "The scoring engine is still starting. Try again in a moment."
+MSG_DB_SAVE = "Could not save your result. Please try again."
+MSG_DB_APPLY = "Could not send your application. Please try again."
 MSG_CONSENT = "Tick the box to share this summary with the lender."
+DB_ERRORS = (SQLAlchemyError, db.DatabaseUnavailable)
 
 
 class UserError(ValueError):
@@ -229,6 +233,8 @@ def _score_upload(file, filename, amount=None, term=None) -> tuple:
     data, ext = _upload_bytes(file, filename)
     if amount is None or term is None:
         amount, term = median_request()
+    if not model_path().exists():
+        raise UserError(MSG_NO_MODEL)
     try:
         res = P.score_uploaded_file(data, "statement" + ext, amount, term,
                                     model_path=str(model_path()), reference_path=str(reference_path()))
@@ -238,10 +244,11 @@ def _score_upload(file, filename, amount=None, term=None) -> tuple:
         raise UserError(MSG_PDF_PASSWORD) from None
     except StatementError:
         raise UserError(MSG_UNREADABLE) from None
-    except FileNotFoundError:
+    except (FileNotFoundError, ImportError, MemoryError):   # model or reference files, or shap still loading
         raise UserError(MSG_NO_MODEL) from None
     except ValueError as e:
-        raise UserError(MSG_NO_TRANSACTIONS if "transactions" in str(e) else MSG_UNREADABLE) from None
+        # predict.py: "The statement has no transactions...", "No usable transactions before the application date"
+        raise UserError(MSG_TOO_SHORT if "transactions" in str(e) else MSG_UNREADABLE) from None
     except Exception:       # noqa: BLE001 - any other reader failure: a fixed message, never the exception text
         raise UserError(MSG_UNREADABLE) from None
     finally:
@@ -286,18 +293,25 @@ def run_score_check(conn, user, file, filename=None, now=None) -> dict:
     res, amount, term = _score_upload(file, filename)
     created = db.utcnow(now)
     summary = _summary(res, amount, term, created)
+    summary["save_error"] = None
     el = summary["eligibility"]
-    with db.transaction(conn):                     # the saved check and its audit row, together
-        if user.get("save_results"):
-            r = conn.execute(insert(score_checks).values(
-                user_id=user["id"], created_at=created, score=summary["score"], pd=summary["pd"], tier=summary["tier"],
-                pillars_json=json.dumps(summary["pillars"]), reasons_json=json.dumps(summary["reasons"]),
-                data_notes_json=json.dumps(summary["data_notes"]), request_amount=amount, request_term=term,
-                monthly_income=summary["monthly_income"], affordability_band=summary["affordability_band"],
-                rows_read=summary["rows_read"], max_amount=el["max_amount"], comfortable_amount=el["comfortable_amount"]))
-            summary["check_id"] = int(r.inserted_primary_key[0])
-        db.audit(conn, "score_check", actor_id=user["id"],
-                 target=f"check:{summary['check_id']}" if summary["check_id"] else "not_saved", now=now)
+    try:
+        with db.transaction(conn):                 # the saved check and its audit row, together
+            if user.get("save_results"):
+                r = conn.execute(insert(score_checks).values(
+                    user_id=user["id"], created_at=created, score=summary["score"], pd=summary["pd"],
+                    tier=summary["tier"], pillars_json=json.dumps(summary["pillars"]),
+                    reasons_json=json.dumps(summary["reasons"]), data_notes_json=json.dumps(summary["data_notes"]),
+                    request_amount=amount, request_term=term, monthly_income=summary["monthly_income"],
+                    affordability_band=summary["affordability_band"], rows_read=summary["rows_read"],
+                    max_amount=el["max_amount"], comfortable_amount=el["comfortable_amount"]))
+                summary["check_id"] = int(r.inserted_primary_key[0])
+            db.audit(conn, "score_check", actor_id=user["id"],
+                     target=f"check:{summary['check_id']}" if summary["check_id"] else "not_saved", now=now)
+    except DB_ERRORS:
+        # the score was computed: keep it for this session and say it could not be saved (the transaction rolled back)
+        summary["check_id"] = None
+        summary["save_error"] = MSG_DB_SAVE
     return summary
 
 
@@ -410,10 +424,16 @@ def submit_application(conn, user, lender_id, file, amount, term, consent, filen
     elif amount > el["max_amount"]:
         out["outcome"] = OUTCOME_ABOVE_LIMIT
     if out["outcome"] is not None:
-        db.audit(conn, "application_refused", actor_id=user["id"], detail=REFUSAL_CODES[out["outcome"]], now=now)
+        try:
+            db.audit(conn, "application_refused", actor_id=user["id"], detail=REFUSAL_CODES[out["outcome"]], now=now)
+        except DB_ERRORS:
+            pass                                   # the refusal stands; only its audit row is lost
         return out
+    try:
+        out["application"] = _insert_application(conn, user, lender, snapshot(summary), now)
+    except DB_ERRORS:
+        raise UserError(MSG_DB_APPLY) from None    # nothing was stored (one transaction)
     out["outcome"] = OUTCOME_SENT
-    out["application"] = _insert_application(conn, user, lender, snapshot(summary), now)
     return out
 
 

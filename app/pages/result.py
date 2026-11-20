@@ -31,6 +31,8 @@ def render(conn, user) -> None:
         ui.hero(cta=True)
         return
     ui.hero(result["score"], result["tier"], f"Chance of default {ui.pct(result['pd'])}")
+    if result.get("save_error"):                       # scored, but the database could not store it
+        ui.alert(result["save_error"])
 
     el = result["eligibility"]
     with st.container(key="card_eligibility"):

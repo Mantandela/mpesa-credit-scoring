@@ -201,6 +201,23 @@ def create_schema(engine: Engine) -> None:
     metadata.create_all(engine, checkfirst=True)
 
 
+SCHEMA_OUT_OF_DATE = "Database schema out of date. See docs/database.md."
+
+
+def schema_problems(conn_or_engine) -> list:
+    """Columns the code expects but the database lacks, as "table.column" (empty = up to date).
+    create_all adds missing tables but never columns, so a database created by an older version can lack some."""
+    ins = inspect(conn_or_engine)
+    missing = []
+    for name, table in TABLES.items():
+        if not ins.has_table(name):
+            missing.append(name)
+            continue
+        have = {c["name"] for c in ins.get_columns(name)}
+        missing += [f"{name}.{c.name}" for c in table.columns if c.name not in have]
+    return missing
+
+
 _ENGINES: dict = {}
 _LOCK = threading.Lock()
 

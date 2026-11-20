@@ -3,6 +3,7 @@ the estimated eligibility of that result decides whether the application is sent
 import streamlit as st
 
 from app import components as ui, service, theme
+from app.pages import comfortable_amount, current_result
 
 MSG_ABOVE = "You can apply for up to {}. Lower the amount and try again."
 MSG_NOT_ELIGIBLE = "Not eligible right now."
@@ -22,12 +23,24 @@ def render(conn, user) -> None:
         ui.alert(str(e))
         return
 
+    result = current_result(conn, user)               # this session's result, else the latest saved check
+    if result is not None:
+        el = result["eligibility"]
+        with st.container(key="card_limit"):
+            if el["status"] == "eligible":
+                ui.html(f'<div class="limit-line">Your estimated limit: Up to {ui.money(el["max_amount"])}</div>'
+                        f'<div class="caption">Comfortable up to {ui.money(el["comfortable_amount"])}</div>')
+            else:
+                text = "Not eligible right now" if el["status"] == "not_eligible" else "Not enough income data"
+                ui.html(f'<div class="limit-line">Your estimated limit: {text}</div>')
+    start_amount = comfortable_amount(result) or int(med_amount)
+
     with st.container(key="card_lenders"):
         names = {l["id"]: l["org_name"] for l in lenders}
         lender_id = st.radio("Lender", list(names), format_func=names.get, key="apply_lender")
     with st.container(key="card_request"):
         ui.section("Loan request")
-        amount = st.number_input("Amount (KES)", min_value=1, value=int(med_amount), step=500, key="apply_amount_in")
+        amount = st.number_input("Amount (KES)", min_value=1, value=int(start_amount), step=500, key="apply_amount_in")
         term = st.number_input("Repay within (days)", min_value=1, value=int(med_term), step=1, key="apply_term_in")
     n = st.session_state.setdefault("apply_upload_n", 0)     # a new key clears the uploader after every attempt
     with st.container(key="card_apply_upload"):

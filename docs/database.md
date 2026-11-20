@@ -35,6 +35,12 @@ change must be updated by hand:
 
   Old saved checks then show "Not enough income data" until the vendor checks their score again.
 
+**Out-of-date schema check:** at start-up the app compares the database with the schema in `app/db.py` (SQLite and
+PostgreSQL). If columns are missing it writes one log line, for example
+`Database schema out of date. See docs/database.md. Missing: score_checks.max_amount, score_checks.comfortable_amount`,
+and every page shows a short card "Database schema out of date. See docs/database.md." instead of failing on the
+first insert or select. Restart the app after fixing the database (the check runs once per process).
+
 ## SQLite (default)
 
 Nothing to set up:
