@@ -1,4 +1,5 @@
-"""Reasons and loan check. The slider recomputes ONLY the affordability band from monthly income; it never re-scores."""
+"""Reasons, plus a what-if "Test an amount" tool. The slider recomputes ONLY the affordability band from monthly
+income; it never re-scores and never changes the estimated limit."""
 from html import escape
 
 import streamlit as st
@@ -11,19 +12,30 @@ SLIDER_MIN, SLIDER_MAX, SLIDER_STEP = 1000, 150000, 500
 
 def render(conn, user) -> None:
     result = current_result(conn, user)
-    ui.top_bar(user, "Loan check", "Score stays the same")
+    ui.top_bar(user, "Reasons", "What affects your score")
     if result is None:
         ui.hero(cta=True)
         return
 
+    with st.container(key="card_reasons"):
+        ui.section("What affects your score")
+        ui.html("".join(ui.reason_row(r["direction"], r["phrase"]) for r in result["reasons"]))
+        if result["data_notes"]:
+            ui.html(f'<div class="muted">No data in this statement on: {escape(", ".join(result["data_notes"]))}</div>')
+
     requested = float(result["request_amount"])
-    top = max(SLIDER_MAX, int(requested))                   # a typed amount above 150,000 stays reachable
+    top = max(SLIDER_MAX, int(requested))
     start = int(min(max(requested, SLIDER_MIN), top))
     amount = st.session_state.get("loan_amount", start)
     check = service.affordability(amount, result["monthly_income"])
+    el = result["eligibility"]
 
     with st.container(key="card_loan"):
-        ui.html(f'<div class="caption">Loan amount</div><div class="big-amount">{ui.money(amount)}</div>')
+        ui.section("Test an amount")
+        limit = (f"Up to {ui.money(el['max_amount'])}" if el["status"] == "eligible"
+                 else "Not eligible right now" if el["status"] == "not_eligible" else "Not enough income data")
+        ui.html(f'<div class="row"><span class="k"><span class="big-amount">{ui.money(amount)}</span></span>'
+                f'<span class="v">Your limit<br><b style="color:#1D1B3A">{escape(limit)}</b></span></div>')
         st.slider("Loan amount (KES)", min_value=SLIDER_MIN, max_value=top, value=start, step=SLIDER_STEP,
                   key="loan_amount", format="%d", label_visibility="collapsed")   # the amount above is its visible label
         share = check["share_of_monthly_income"]
@@ -32,11 +44,4 @@ def render(conn, user) -> None:
         if check["outside_typical_range"]:
             ui.muted("Outside typical range")
 
-    with st.container(key="card_reasons"):
-        ui.section("What affects your score")
-        ui.html("".join(ui.reason_row(r["direction"], r["phrase"]) for r in result["reasons"]))
-        if result["data_notes"]:
-            ui.html(f'<div class="muted">No data in this statement on: {escape(", ".join(result["data_notes"]))}</div>')
-
-    st.button("Apply to a lender", type="primary", key="to_apply", on_click=ui.go, args=("apply",),
-              kwargs={"apply_amount": amount}, width="stretch")
+    st.button("Apply for a loan", type="primary", key="reasons_apply", on_click=ui.go, args=("apply",), width="stretch")

@@ -44,7 +44,8 @@ def test_schema_is_created_with_the_agreed_columns_and_indexes(engine, conn):
         "created_at", "share_with_lenders", "save_results", "email_notifications"]
     assert db.table_columns(engine, "score_checks") == [
         "id", "user_id", "created_at", "score", "pd", "tier", "pillars_json", "reasons_json", "data_notes_json",
-        "request_amount", "request_term", "monthly_income", "affordability_band", "rows_read"]
+        "request_amount", "request_term", "monthly_income", "affordability_band", "rows_read", "max_amount",
+        "comfortable_amount"]
     assert db.table_columns(engine, "applications") == [
         "id", "ref", "vendor_id", "lender_id", "check_id", "snapshot_json", "status", "lender_note", "created_at", "decided_at"]
     assert db.table_columns(engine, "audit_log") == ["id", "ts", "actor_id", "action", "target", "detail"]

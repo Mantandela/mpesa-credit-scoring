@@ -111,6 +111,9 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 .center { text-align: center; }
 .alert-text { color: #B42318; font-weight: 500; font-size: 14px; margin: 0; }
 .big-amount { font-size: 34px; font-weight: 700; color: #1D1B3A; line-height: 1.15; }
+.elig-max { font-size: 28px; font-weight: 700; color: #1D1B3A; line-height: 1.2; }
+.elig-comf { font-size: 15px; color: #1D1B3A; margin-top: 2px; }
+.elig-no { font-size: 18px; line-height: 1.3; }
 
 /* ---------- top bar ---------- */
 .st-key-topbar { align-items: center; gap: 12px !important; flex-wrap: nowrap !important; }

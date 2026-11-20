@@ -1,6 +1,9 @@
-"""Web app service layer (app/service.py): scoring an upload, affordability bands, applications, privacy.
+"""Web app service layer (app/service.py): Check score, estimated eligibility, Apply (fresh scoring), privacy.
 
-Uses a toy model trained in a temporary folder (tests/app_helpers.py) and synthetic statements only.
+Uses a toy model trained in a temporary folder (tests/app_helpers.py) and synthetic statements only. Under that
+model the default toy statement is Very high risk (not eligible) and RICH (about KES 164,000 a month) is Low risk:
+eligible up to KES 34,300, comfortable up to KES 9,200. Every test runs on SQLite, and on PostgreSQL too when
+DATABASE_URL points at one (marked `postgres`).
 """
 import json
 import re
@@ -11,10 +14,13 @@ import pytest
 import app_helpers as H
 from app import auth, db, service
 
+import eligibility as EL
 import predict as P
 import toy
 
 PW = "correct-horse-1"
+RICH = toy.make_vendor(days=120, daily_in=164000 / 30)
+NO_INCOME = toy.recompute_balance(toy.make_vendor()[lambda d: d.paid_in == 0].reset_index(drop=True), opening=50000.0)
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +30,6 @@ def models(tmp_path_factory):
 
 @pytest.fixture(params=H.BACKENDS)
 def env(request, models, tmp_path, monkeypatch):
-    """SQLite always; PostgreSQL too when DATABASE_URL points at one (marked `postgres`)."""
     monkeypatch.setenv("APP_MODEL_PATH", str(models["model"]))
     monkeypatch.setenv("APP_REFERENCE_PATH", str(models["ref"]))
     with H.database(request.param, tmp_path) as engine:
@@ -41,68 +46,88 @@ def csv_bytes():
     return H.statement_csv()
 
 
-def _check(env, data=None, amount=5000, term=14, name="statement.csv", user=None):
+@pytest.fixture(scope="module")
+def rich_bytes():
+    return H.statement_csv(RICH)
+
+
+def _check(env, data=None, name="statement.csv", user=None):
     data = H.statement_csv() if data is None else data
-    return service.run_score_check(env["conn"], user or env["vendor"], H.Upload(data, name), amount, term)
+    return service.run_score_check(env["conn"], user or env["vendor"], H.Upload(data, name))
 
 
-# ---------------------------------------------------------------- scoring
-def test_score_check_returns_the_summary_and_saves_it(env, csv_bytes):
-    s = _check(env, csv_bytes)
+def _submit(env, data, amount=5000, term=14, consent=True, user=None, lender=None, name="statement.csv"):
+    return service.submit_application(env["conn"], user or env["vendor"], lender or env["lender_id"],
+                                      H.Upload(data, name), amount, term, consent)
+
+
+# ---------------------------------------------------------------- check score
+def test_score_check_returns_the_summary_with_eligibility_and_saves_it(env, rich_bytes):
+    s = _check(env, rich_bytes)
     assert 300 <= s["score"] <= 850 and 0 < s["pd"] < 1 and s["tier"].endswith("risk")
     assert [p["name"] for p in s["pillars"]] == list(service.PILLAR_NAMES.values())
     assert all(p["label"] in {"Weak", "Fair", "Good", "Strong"} for p in s["pillars"])
     assert 1 <= len(s["reasons"]) <= 5 and all(r["direction"] in {"Raises risk", "Lowers risk"} for r in s["reasons"])
-    assert s["rows_read"] > 100 and s["monthly_income"] > 0 and s["check_id"] is not None
+    assert s["rows_read"] > 100 and s["check_id"] is not None
+    assert s["monthly_income"] == pytest.approx(164000, rel=1e-9)
+    el = s["eligibility"]
+    assert el == EL.eligibility(s["tier"], s["monthly_income"], service.cutoffs())
+    assert (el["status"], el["max_amount"], el["comfortable_amount"]) == ("eligible", 34300, 9200)
     row, = H.rows(env["conn"], "score_checks", id=s["check_id"])
     assert row["score"] == s["score"] and row["user_id"] == env["vendor"]["id"] and row["rows_read"] == s["rows_read"]
-    assert service.latest_check(env["conn"], env["vendor"]["id"])["score"] == s["score"]
+    assert (row["max_amount"], row["comfortable_amount"]) == (34300, 9200)
+    latest = service.latest_check(env["conn"], env["vendor"]["id"])
+    assert latest["score"] == s["score"] and latest["eligibility"]["max_amount"] == 34300
     audit = H.rows(env["conn"], "audit_log", action="score_check")
     assert len(audit) == 1 and audit[0]["target"] == f"check:{s['check_id']}"
 
 
-def test_score_is_evaluated_at_the_median_request(env, csv_bytes, models):
-    a = _check(env, csv_bytes, amount=1000, term=7)
-    b = _check(env, csv_bytes, amount=200000, term=60)
-    for k in ("score", "pd", "tier", "pillars", "reasons", "data_notes"):
-        assert a[k] == b[k], k
+def test_check_score_needs_no_amount_or_term_and_scores_at_the_median_request(env, csv_bytes, models):
+    import inspect
+    assert list(inspect.signature(service.run_score_check).parameters) == ["conn", "user", "file", "filename", "now"]
+    s = _check(env, csv_bytes)
     direct = P.score_statement(toy.make_vendor(), model_path=str(models["model"]), reference_path=str(models["ref"]))
-    assert a["pd"] == pytest.approx(direct["probability_of_default"], abs=1e-12)        # median request by default
-    assert service.median_request() == (models["reference"]["requested_amount"]["median"],
-                                        models["reference"]["requested_term_days"]["median"])
+    assert s["pd"] == pytest.approx(direct["probability_of_default"], abs=1e-12)
+    assert (s["request_amount"], s["request_term"]) == service.median_request()
 
 
-def test_raw_amount_is_not_clipped(env):
-    vendor = toy.make_vendor(days=120, daily_in=164000 / 30)           # about KES 164,000 of income a month
-    s = _check(env, H.statement_csv(vendor), amount=200000, term=30)
-    assert s["request_amount"] == 200000.0
-    assert s["monthly_income"] == pytest.approx(164000, rel=1e-9)
-    assert s["affordability_band"] == "heavy" and s["outside_typical_range"]
-    small = _check(env, H.statement_csv(vendor), amount=5000, term=14)
-    assert small["affordability_band"] == "comfortable" and not small["outside_typical_range"]
-    assert small["score"] == s["score"]
+def test_very_high_tier_is_not_eligible(env, csv_bytes):
+    s = _check(env, csv_bytes)
+    assert s["tier"] == "Very high risk"
+    assert s["eligibility"] == {"status": "not_eligible", "max_amount": 0, "comfortable_amount": 0, "tier_factor": 0.0}
+    row, = H.rows(env["conn"], "score_checks", id=s["check_id"])
+    assert service.latest_check(env["conn"], env["vendor"]["id"])["eligibility"]["status"] == "not_eligible"
+    assert row["max_amount"] == 0
 
 
-def test_save_results_off_stores_nothing(env, csv_bytes):
+def test_no_income_is_unknown(env):
+    s = _check(env, H.statement_csv(NO_INCOME))
+    assert s["monthly_income"] is None and s["eligibility"]["status"] == "unknown"
+    assert service.latest_check(env["conn"], env["vendor"]["id"])["eligibility"]["status"] == "unknown"
+
+
+def test_save_results_off_stores_nothing(env, rich_bytes):
     user = service.update_profile_flags(env["conn"], env["vendor"]["id"], save_results=False)
-    s = _check(env, csv_bytes, user=user)
-    assert s["check_id"] is None and s["score"]
+    s = _check(env, rich_bytes, user=user)
+    assert s["check_id"] is None and s["eligibility"]["status"] == "eligible"
     assert db.count(env["conn"], "score_checks") == 0
     assert [r["target"] for r in H.rows(env["conn"], "audit_log", action="score_check")] == ["not_saved"]
 
 
-def test_only_vendors_can_score(env, csv_bytes):
+def test_only_vendors_can_score_or_apply(env, csv_bytes):
     lender = auth.get_user(env["conn"], env["lender_id"])
     with pytest.raises(auth.AccessDenied):
         _check(env, csv_bytes, user=lender)
+    with pytest.raises(auth.AccessDenied):
+        _submit(env, csv_bytes, user=lender)
 
 
-# ---------------------------------------------------------------- affordability
+# ---------------------------------------------------------------- affordability (what-if, no re-scoring)
 @pytest.mark.parametrize("ratio, band", [
     (0.0, "comfortable"), (0.056, "comfortable"), (H.REAL_P50, "comfortable"), (0.0564, "stretched"),
     (0.419, "stretched"), (H.REAL_P85, "stretched"), (0.4195, "heavy"), (5.0, "heavy")])
 def test_affordability_band_boundaries(env, ratio, band):
-    assert service.affordability_band(ratio, 1.0) == band                 # amount / monthly income = ratio exactly
+    assert service.affordability_band(ratio, 1.0) == band
     assert service.affordability_band(ratio * 100000, 100000) == band
 
 
@@ -111,45 +136,93 @@ def test_affordability_band_without_income_and_monotone(env):
     rank = {"comfortable": 0, "stretched": 1, "heavy": 2}
     bands = [rank[service.affordability_band(a, 50000)] for a in range(1000, 150001, 500)]
     assert bands == sorted(bands) and set(bands) == {0, 1, 2}
-    a = service.affordability(150000, 50000)
-    assert a["share_of_monthly_income"] == 3.0 and a["band"] == "heavy" and a["outside_typical_range"]
 
 
-def test_service_band_matches_the_scoring_function(env, csv_bytes):
-    s = _check(env, csv_bytes, amount=7500, term=14)
-    assert service.affordability_band(7500, s["monthly_income"]) == s["affordability_band"]
-
-
-# ---------------------------------------------------------------- applications
-def test_create_application_stores_only_the_summary_snapshot(env, csv_bytes):
-    s = _check(env, csv_bytes)
-    with pytest.raises(service.UserError, match="Tick the box"):
-        service.create_application(env["conn"], env["vendor"], env["lender_id"], s, consent=False)
-    sent = service.create_application(env["conn"], env["vendor"], env["lender_id"], s, amount=20000, term=30, consent=True)
+# ---------------------------------------------------------------- apply: fresh scoring and eligibility
+def test_submit_sends_a_snapshot_of_the_fresh_scoring(env, csv_bytes, rich_bytes):
+    old = _check(env, csv_bytes)                      # an older saved check from ANOTHER statement (Very high)
+    out = _submit(env, rich_bytes, amount=20000, term=30)
+    assert out["outcome"] == service.OUTCOME_SENT
+    sent = out["application"]
     assert re.fullmatch(r"A-\d{3,}", sent["ref"]) and sent["lender"] == "Umoja SACCO" and sent["status"] == "pending"
     row, = H.rows(env["conn"], "applications", id=sent["id"])
-    assert row["ref"] == f"A-{100 + sent['id']}" and row["status"] == "pending"
     snap = json.loads(row["snapshot_json"])
     assert tuple(snap) == service.SNAPSHOT_KEYS
-    assert snap["score"] == s["score"] and snap["tier"] == s["tier"] and snap["pd"] == s["pd"]
+    fresh = out["result"]
+    assert snap["score"] == fresh["score"] != old["score"] and snap["tier"] == "Low risk" != old["tier"]
+    assert snap["pd"] == fresh["pd"] and snap["data_notes"] == fresh["data_notes"]
     assert snap["request"] == {"amount": 20000.0, "term_days": 30.0}
-    assert snap["affordability"]["band"] == service.affordability_band(20000, s["monthly_income"])
+    assert snap["affordability"] == {"band": service.affordability_band(20000, fresh["monthly_income"])}
+    assert snap["eligibility"] == {"max_amount": 34300, "comfortable_amount": 9200}
     assert all(set(p) == {"name", "rating", "label"} for p in snap["pillars"])
     assert all(set(r) == {"phrase", "direction"} for r in snap["reasons"])
-    assert set(snap["affordability"]) == {"band", "share_of_monthly_income"}
-    assert '"monthly_income"' not in json.dumps(snap) and "rows_read" not in json.dumps(snap)
+    assert "monthly_income" not in snap and "rows_read" not in json.dumps(snap)
+    assert row["check_id"] is None                     # not linked to any saved check
+    assert db.count(env["conn"], "score_checks") == 1   # submitting saves no score check
     apps = service.list_applications(env["conn"], env["vendor"]["id"])
     assert [(a["ref"], a["lender"], a["status"]) for a in apps] == [(sent["ref"], "Umoja SACCO", "pending")]
+
+
+def test_amount_up_to_the_limit_is_sent_and_above_it_is_refused(env, rich_bytes):
+    above = _submit(env, rich_bytes, amount=34400)
+    assert above["outcome"] == service.OUTCOME_ABOVE_LIMIT and above["max_amount"] == 34300
+    assert above["application"] is None and db.count(env["conn"], "applications") == 0
+    at_limit = _submit(env, rich_bytes, amount=34300)
+    assert at_limit["outcome"] == service.OUTCOME_SENT and db.count(env["conn"], "applications") == 1
+
+
+def test_very_high_tier_is_refused_and_nothing_is_sent(env, csv_bytes):
+    out = _submit(env, csv_bytes, amount=1000)
+    assert out["outcome"] == service.OUTCOME_NOT_ELIGIBLE and out["result"]["tier"] == "Very high risk"
+    assert out["application"] is None and db.count(env["conn"], "applications") == 0
+
+
+def test_no_income_data_is_refused(env):
+    out = _submit(env, H.statement_csv(NO_INCOME))
+    assert out["outcome"] == service.OUTCOME_NO_INCOME and db.count(env["conn"], "applications") == 0
+
+
+def test_refuses_without_consent_or_lender_and_never_scores(env, rich_bytes, temp_files):
+    d, made = temp_files
+    with pytest.raises(service.UserError, match="Tick the box"):
+        _submit(env, rich_bytes, consent=False)
     with pytest.raises(service.UserError, match="Choose a lender"):
-        service.create_application(env["conn"], env["vendor"], env["vendor"]["id"], s, consent=True)   # not a lender
+        _submit(env, rich_bytes, lender=env["vendor"]["id"])
+    with pytest.raises(service.UserError, match="above 0"):
+        _submit(env, rich_bytes, amount=0)
+    assert not made and db.count(env["conn"], "applications") == 0
 
 
+def test_submit_works_with_save_results_off(env, rich_bytes):
+    user = service.update_profile_flags(env["conn"], env["vendor"]["id"], save_results=False)
+    out = _submit(env, rich_bytes, user=user)
+    assert out["outcome"] == service.OUTCOME_SENT and db.count(env["conn"], "score_checks") == 0
+
+
+def test_audit_rows_hold_fixed_codes_only(env, rich_bytes, csv_bytes):
+    _submit(env, rich_bytes, amount=34400, name="JANE WANJIKU 0722987654.csv")           # above limit
+    _submit(env, csv_bytes, amount=1000, name="my statement.csv")                         # not eligible
+    _submit(env, H.statement_csv(NO_INCOME))                                             # no income data
+    sent = _submit(env, rich_bytes, amount=12345)["application"]
+    refused = H.rows(env["conn"], "audit_log", action="application_refused")
+    assert [r["detail"] for r in refused] == ["above_limit", "not_eligible", "no_income_data"]
+    assert all(r["target"] is None for r in refused)
+    sent_rows = H.rows(env["conn"], "audit_log", action="application_sent")
+    assert [(r["target"], r["detail"]) for r in sent_rows] == [(sent["ref"], f"lender:{env['lender_id']}")]
+    text = " ".join(str(v) for r in H.rows(env["conn"], "audit_log") for v in r.values())
+    for s in ("34400", "34300", "12345", ".csv", "JANE", "statement", "0722987654"):
+        assert s not in text, s
+
+
+# ---------------------------------------------------------------- references
 def test_two_vendors_applying_at_the_same_time_get_different_references(env):
-    """Two vendors, each on its own connection, send 5 applications at the same moment (a barrier releases them
+    """Two vendors, each on its own connection, store 5 applications at the same moment (a barrier releases them
     together). References come from the row id, so all 10 differ and match their rows."""
     second = service.register_vendor(env["conn"], "Second Vendor", "second@example.com", PW, PW)
-    summary = {"check_id": None, "score": 640, "pd": 0.11, "tier": "Moderate risk", "pillars": [], "reasons": [],
-               "request_amount": 5000.0, "request_term": 14.0, "monthly_income": 60000.0}
+    summary = {"score": 640, "pd": 0.11, "tier": "Moderate risk", "pillars": [], "reasons": [], "data_notes": [],
+               "request_amount": 5000.0, "request_term": 14.0, "affordability_band": "comfortable",
+               "eligibility": {"status": "eligible", "max_amount": 24000, "comfortable_amount": 9200}}
+    lender = {"id": env["lender_id"], "org_name": "Umoja SACCO"}
     barrier, refs, errors = threading.Barrier(2), [], []
 
     def send(vendor):
@@ -157,7 +230,7 @@ def test_two_vendors_applying_at_the_same_time_get_different_references(env):
         try:
             barrier.wait()
             for _ in range(5):
-                refs.append(service.create_application(conn, vendor, env["lender_id"], summary, consent=True)["ref"])
+                refs.append(service._insert_application(conn, vendor, lender, service.snapshot(summary))["ref"])
         except Exception as e:      # noqa: BLE001
             errors.append(e)
         finally:
@@ -172,30 +245,30 @@ def test_two_vendors_applying_at_the_same_time_get_different_references(env):
     stored = H.rows(env["conn"], "applications")
     assert sorted(r["ref"] for r in stored) == sorted(refs)
     assert all(r["ref"] == f"A-{100 + r['id']}" for r in stored)
-    assert {r["vendor_id"] for r in stored} == {env["vendor"]["id"], second["id"]}
 
 
 def test_list_lenders_shows_organisations(env):
     assert [l["org_name"] for l in service.list_lenders(env["conn"])] == ["Tumaini Microfinance", "Umoja SACCO"]
 
 
-def test_delete_saved_results(env, csv_bytes):
-    s1 = _check(env, csv_bytes)
-    _check(env, csv_bytes)
-    sent = service.create_application(env["conn"], env["vendor"], env["lender_id"], s1, consent=True)
+def test_delete_saved_results_keeps_sent_applications(env, rich_bytes):
+    _check(env, rich_bytes)
+    _check(env, rich_bytes)
+    sent = _submit(env, rich_bytes)["application"]
     assert len(service.score_history(env["conn"], env["vendor"]["id"])) == 2
     assert service.delete_saved_results(env["conn"], env["vendor"]) == 2
     assert service.score_history(env["conn"], env["vendor"]["id"]) == [] and service.latest_check(env["conn"], env["vendor"]["id"]) is None
     app, = H.rows(env["conn"], "applications", id=sent["id"])
-    assert app["check_id"] is None and json.loads(app["snapshot_json"])["score"] == s1["score"]   # the lender copy stays
+    assert json.loads(app["snapshot_json"])["score"] > 0                                 # the lender copy stays
     assert [r["detail"] for r in H.rows(env["conn"], "audit_log", action="delete_saved_results")] == ["checks=2"]
 
 
 # ---------------------------------------------------------------- privacy and files
-def test_no_statement_content_in_the_database_or_audit_log(env, csv_bytes):
-    s = _check(env, csv_bytes, name="JANE WANJIKU statement 0722987654.csv")
-    service.create_application(env["conn"], env["vendor"], env["lender_id"], s, consent=True)
-    text = H.all_text(env["conn"]) + json.dumps(s)
+def test_no_statement_content_in_the_database_or_audit_log(env, rich_bytes):
+    s = _check(env, rich_bytes, name="JANE WANJIKU statement 0722987654.csv")
+    out = _submit(env, rich_bytes, amount=9000, name="PETER OTIENO 0711222333.csv")
+    assert out["outcome"] == service.OUTCOME_SENT
+    text = H.all_text(env["conn"]) + json.dumps(s) + json.dumps(out)
     for name in H.NAMES:
         for part in name.split():
             assert part not in text.upper(), "a name from the statement was stored"
@@ -204,8 +277,6 @@ def test_no_statement_content_in_the_database_or_audit_log(env, csv_bytes):
     assert not re.search(r"(?<![\d.])\d{9,}", text), "a phone-like digit run was stored"
     for word in ("Merchant Payment", "Customer Withdrawal", "CP_", "Receipt", "statement 0722"):
         assert word not in text
-    audit = " ".join(str(v) for r in H.rows(env["conn"], "audit_log") for v in r.values())
-    assert ".csv" not in audit and "statement" not in audit.lower()
 
 
 @pytest.fixture
@@ -224,12 +295,16 @@ def temp_files(tmp_path, monkeypatch):
     return d, made
 
 
-def test_uploaded_temp_file_is_removed(env, csv_bytes, temp_files):
+def test_uploaded_temp_file_is_removed(env, csv_bytes, rich_bytes, temp_files):
     d, made = temp_files
-    _check(env, csv_bytes)
+    _check(env, csv_bytes)                                                     # check score
+    _submit(env, rich_bytes)                                                   # apply, sent
+    _submit(env, rich_bytes, amount=10 ** 6)                                   # apply, above limit
     with pytest.raises(service.UserError, match="could not read"):
         _check(env, b"Receipt No.,Completion Time\nx,y\n")
-    assert len(made) == 2 and not any(d.iterdir())
+    with pytest.raises(service.UserError, match="could not read"):
+        _submit(env, b"Receipt No.,Completion Time\nx,y\n")
+    assert len(made) == 5 and not any(d.iterdir())
 
 
 def test_rejected_files_are_never_written(env, temp_files):
@@ -239,9 +314,7 @@ def test_rejected_files_are_never_written(env, temp_files):
     with pytest.raises(service.UserError, match="10 MB"):
         _check(env, b"x" * (service.MAX_UPLOAD_BYTES + 1))
     with pytest.raises(service.UserError, match="empty"):
-        _check(env, b"")
-    with pytest.raises(service.UserError, match="above 0"):
-        _check(env, b"x,y\n", amount=0)
+        _submit(env, b"")
     assert not made and not any(d.iterdir())
 
 
@@ -252,11 +325,12 @@ def test_scanned_pdf_gets_the_friendly_message(env, tmp_path, temp_files):
     c.rect(50, 50, 300, 300, fill=1)
     c.showPage()
     c.save()
-    with pytest.raises(service.UserError) as e:
-        _check(env, p.read_bytes(), name="scan.pdf")
-    assert str(e.value) == "This PDF has no selectable text. Please upload the Excel or CSV statement."
+    for call in (lambda: _check(env, p.read_bytes(), name="scan.pdf"), lambda: _submit(env, p.read_bytes(), name="scan.pdf")):
+        with pytest.raises(service.UserError) as e:
+            call()
+        assert str(e.value) == "This PDF has no selectable text. Please upload the Excel or CSV statement."
     d, made = temp_files
-    assert len(made) == 1 and not any(d.iterdir())
+    assert len(made) == 2 and not any(d.iterdir())
 
 
 def test_unexpected_reader_errors_never_leak_their_text(env, monkeypatch):

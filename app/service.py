@@ -3,13 +3,17 @@
 Every function takes the database connection first (app/db.py: SQLite or PostgreSQL through SQLAlchemy Core). A
 function that writes more than one row does so in ONE transaction.
 
-Scoring goes through src/predict.py: the score, chance of default, tier, pillar ratings and reasons are evaluated at
-the MEDIAN request (predict.py does this); the typed amount and term feed only the affordability check, as typed.
+Two separate flows:
+- Check score (run_score_check): score an uploaded statement at the MEDIAN request (predict.py does this) and add
+  the estimated eligibility (src/eligibility.py, a prototype policy). No amount or term is asked for.
+- Apply (submit_application): the statement is uploaded AGAIN and scored fresh with the requested amount and term;
+  the eligibility of THAT result decides whether anything is sent. Lenders receive only a summary snapshot of the
+  fresh result, never the statement.
 
 Privacy: an uploaded statement is read once, in memory, through predict.score_uploaded_file (one temporary file,
 deleted in a `finally`). Nothing from the statement is stored, logged or put in an error message: the database keeps
-only the result (score, ratings, reason phrases, request, derived monthly income, number of rows read), and lenders
-receive only a summary snapshot.
+only results (score, ratings, reason phrases, request, derived monthly income, eligibility amounts, rows read), and
+the audit log keeps actions, ids and fixed reason codes (never amounts, file names or statement content).
 
 Model files: APP_MODEL_PATH and APP_REFERENCE_PATH override models/logistic.joblib and models/reference.json.
 """
@@ -26,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+import eligibility as EL  # noqa: E402
 import predict as P  # noqa: E402
 from pdf_statement import NoTextLayerError, PasswordError, StatementError  # noqa: E402
 
@@ -43,9 +48,16 @@ PILLAR_NAMES = {
     "F_history_growth": "History and growth",
     "G_network": "Network",
 }
-SNAPSHOT_KEYS = ("score", "tier", "pd", "pillars", "reasons", "request", "affordability")
+SNAPSHOT_KEYS = ("score", "tier", "pd", "pillars", "reasons", "data_notes", "request", "affordability", "eligibility")
 PROFILE_FLAGS = ("share_with_lenders", "save_results", "email_notifications")
 REF_OFFSET = 100                     # application reference = "A-" + (row id + 100): A-101, A-102, ...
+
+# submit_application outcomes, and the fixed reason codes written to the audit log for a refusal
+OUTCOME_SENT = "sent"
+OUTCOME_NOT_ELIGIBLE = "not eligible"
+OUTCOME_NO_INCOME = "not enough income data"
+OUTCOME_ABOVE_LIMIT = "above limit"
+REFUSAL_CODES = {OUTCOME_NOT_ELIGIBLE: "not_eligible", OUTCOME_NO_INCOME: "no_income_data", OUTCOME_ABOVE_LIMIT: "above_limit"}
 
 MSG_TYPE = "Upload an Excel (.xlsx, .xls) or CSV statement, or a PDF with selectable text."
 MSG_SIZE = "The file is larger than 10 MB."
@@ -55,6 +67,7 @@ MSG_PDF_PASSWORD = "This PDF is password protected. Please upload the Excel or C
 MSG_UNREADABLE = "We could not read this statement. Please upload the Excel or CSV statement from M-Pesa."
 MSG_NO_TRANSACTIONS = "We found no transactions we could use in this statement."
 MSG_NO_MODEL = "Scoring is not available right now."
+MSG_CONSENT = "Tick the box to share this summary with the lender."
 
 
 class UserError(ValueError):
@@ -85,7 +98,7 @@ def reference() -> dict:
 
 
 def median_request() -> tuple:
-    """(amount, term) of the median request in reference.json: the form defaults and the request the score uses."""
+    """(amount, term) of the median request in reference.json: the Apply form defaults and the request the score uses."""
     r = reference()
     return float(r["requested_amount"]["median"]), float(r["requested_term_days"]["median"])
 
@@ -93,6 +106,11 @@ def median_request() -> tuple:
 def typical_amount_range() -> tuple:
     r = reference()["requested_amount"]
     return float(r["p01"]), float(r["p99"])
+
+
+def cutoffs() -> EL.Cutoffs:
+    """The affordability band cutoffs of the reference file (never hard-coded)."""
+    return EL.cutoffs_from_reference(reference())
 
 
 def warm_up() -> None:
@@ -166,7 +184,7 @@ def change_password(conn, user, current, new, confirm) -> None:
         db.audit(conn, "password_changed", actor_id=user["id"])
 
 
-# ------------------------------------------------------------------ score check
+# ------------------------------------------------------------------ scoring an upload (shared by both flows)
 def _upload_bytes(file, filename) -> tuple:
     name = filename if filename is not None else getattr(file, "name", "")
     ext = Path(str(name)).suffix.lower()
@@ -204,41 +222,13 @@ def _phrase(label: str) -> str:
     return label[:1].upper() + label[1:]
 
 
-def _summary(res: dict, amount: float, term: float, created) -> dict:
-    aff = res["affordability"]
-    ratio = aff["amount_to_avg_monthly_income_90"]
-    codes = [w["code"] for w in res["warnings"]]
-    return {
-        "check_id": None,
-        "created_at": db.iso(created),
-        "score": int(res["score"]),
-        "pd": float(res["probability_of_default"]),
-        "tier": res["tier"],
-        "pillars": [{"key": p["pillar"], "name": PILLAR_NAMES[p["pillar"]], "rating": int(p["rating"]), "label": p["label"]}
-                    for p in res["pillar_ratings"]],
-        "reasons": [{"phrase": _phrase(r["label"]), "direction": "Raises risk" if r["direction"] == "raises risk" else "Lowers risk"}
-                    for r in res["top_reasons"]],
-        "data_notes": [n["label"] for n in res["data_notes"]],
-        "request_amount": amount,
-        "request_term": term,
-        "monthly_income": amount / ratio if ratio else None,
-        "affordability_band": aff["band"],
-        "outside_typical_range": "request_outside_training_range" in codes,
-        "thin_history": "thin_history" in codes,
-        "rows_read": int(res["inputs_used"]["transactions_used"]),
-    }
-
-
-def run_score_check(conn, user, file, amount, term, filename=None, now=None) -> dict:
-    """Score an uploaded statement for a vendor and return the result summary.
-
-    `file` is a Streamlit UploadedFile, a binary file object or bytes (then pass `filename`; only its extension is
-    used). The statement is never stored; the summary is saved only if the user's save_results setting is on.
-    Raises UserError with a fixed, friendly message for a rejected or unreadable file.
-    """
-    auth.require_role(user, "vendor")
+def _score_upload(file, filename, amount=None, term=None) -> tuple:
+    """Read the upload (in memory; one temporary file deleted in a finally inside predict) and score it.
+    amount/term None = the median request. Returns (predict result, amount used, term used).
+    Raises UserError with a fixed message for anything the user can fix; never the exception text."""
     data, ext = _upload_bytes(file, filename)
-    amount, term = _positive(amount, "the amount"), _positive(term, "the number of days")
+    if amount is None or term is None:
+        amount, term = median_request()
     try:
         res = P.score_uploaded_file(data, "statement" + ext, amount, term,
                                     model_path=str(model_path()), reference_path=str(reference_path()))
@@ -256,8 +246,47 @@ def run_score_check(conn, user, file, amount, term, filename=None, now=None) -> 
         raise UserError(MSG_UNREADABLE) from None
     finally:
         data = None
+    return res, float(amount), float(term)
+
+
+def _summary(res: dict, amount: float, term: float, created) -> dict:
+    """What the app keeps of a score result (no statement content), with the estimated eligibility."""
+    aff = res["affordability"]
+    ratio = aff["amount_to_avg_monthly_income_90"]
+    monthly = amount / ratio if ratio else None
+    codes = [w["code"] for w in res["warnings"]]
+    return {
+        "check_id": None,
+        "created_at": db.iso(created),
+        "score": int(res["score"]),
+        "pd": float(res["probability_of_default"]),
+        "tier": res["tier"],
+        "pillars": [{"key": p["pillar"], "name": PILLAR_NAMES[p["pillar"]], "rating": int(p["rating"]), "label": p["label"]}
+                    for p in res["pillar_ratings"]],
+        "reasons": [{"phrase": _phrase(r["label"]), "direction": "Raises risk" if r["direction"] == "raises risk" else "Lowers risk"}
+                    for r in res["top_reasons"]],
+        "data_notes": [n["label"] for n in res["data_notes"]],
+        "request_amount": amount,
+        "request_term": term,
+        "monthly_income": monthly,
+        "affordability_band": aff["band"],
+        "outside_typical_range": "request_outside_training_range" in codes,
+        "thin_history": "thin_history" in codes,
+        "rows_read": int(res["inputs_used"]["transactions_used"]),
+        "eligibility": EL.eligibility(res["tier"], monthly, cutoffs()),
+    }
+
+
+# ------------------------------------------------------------------ check score
+def run_score_check(conn, user, file, filename=None, now=None) -> dict:
+    """Score an uploaded statement for a vendor (at the median request) and return the summary with the estimated
+    eligibility. `file` is a Streamlit UploadedFile, a binary file object or bytes (then pass `filename`; only its
+    extension is used). The statement is never stored; the summary is saved only if save_results is on."""
+    auth.require_role(user, "vendor")
+    res, amount, term = _score_upload(file, filename)
     created = db.utcnow(now)
     summary = _summary(res, amount, term, created)
+    el = summary["eligibility"]
     with db.transaction(conn):                     # the saved check and its audit row, together
         if user.get("save_results"):
             r = conn.execute(insert(score_checks).values(
@@ -265,11 +294,19 @@ def run_score_check(conn, user, file, amount, term, filename=None, now=None) -> 
                 pillars_json=json.dumps(summary["pillars"]), reasons_json=json.dumps(summary["reasons"]),
                 data_notes_json=json.dumps(summary["data_notes"]), request_amount=amount, request_term=term,
                 monthly_income=summary["monthly_income"], affordability_band=summary["affordability_band"],
-                rows_read=summary["rows_read"]))
+                rows_read=summary["rows_read"], max_amount=el["max_amount"], comfortable_amount=el["comfortable_amount"]))
             summary["check_id"] = int(r.inserted_primary_key[0])
         db.audit(conn, "score_check", actor_id=user["id"],
                  target=f"check:{summary['check_id']}" if summary["check_id"] else "not_saved", now=now)
     return summary
+
+
+def _eligibility_from_row(row: dict) -> dict:
+    if row["monthly_income"] is None or row["max_amount"] is None:
+        return {"status": "unknown", "max_amount": None, "comfortable_amount": None}
+    mx = int(row["max_amount"])
+    return {"status": "eligible" if mx > 0 else "not_eligible", "max_amount": mx,
+            "comfortable_amount": int(row["comfortable_amount"] or 0)}
 
 
 def _check_from_row(row: dict) -> dict:
@@ -278,7 +315,7 @@ def _check_from_row(row: dict) -> dict:
             "data_notes": json.loads(row["data_notes_json"]), "request_amount": row["request_amount"],
             "request_term": row["request_term"], "monthly_income": row["monthly_income"],
             "affordability_band": row["affordability_band"], "outside_typical_range": None, "thin_history": None,
-            "rows_read": row["rows_read"]}
+            "rows_read": row["rows_read"], "eligibility": _eligibility_from_row(row)}
 
 
 def latest_check(conn, user_id) -> dict | None:
@@ -311,49 +348,73 @@ def list_lenders(conn) -> list:
                        .where(users.c.role == "lender", users.c.is_active.is_(True)).order_by(users.c.org_name, users.c.id))
 
 
-def snapshot(summary: dict, amount=None, term=None) -> dict:
-    """What a lender receives: score, tier, chance of default, pillar ratings, reasons, request and affordability.
-    Nothing else (no statement, no transactions, no monthly income, no data notes)."""
-    amount = float(summary["request_amount"] if amount is None else amount)
-    term = float(summary["request_term"] if term is None else term)
-    aff = affordability(amount, summary.get("monthly_income"))
+def snapshot(summary: dict) -> dict:
+    """What a lender receives, from ONE scoring of the statement: score, tier, chance of default, pillar ratings,
+    reasons, data notes, the requested amount and term, the affordability band of that amount and the estimated
+    eligibility. Nothing else (no statement, no transactions, no monthly income)."""
+    el = summary["eligibility"]
     return {
         "score": int(summary["score"]),
         "tier": summary["tier"],
         "pd": float(summary["pd"]),
         "pillars": [{"name": p["name"], "rating": int(p["rating"]), "label": p["label"]} for p in summary["pillars"]],
         "reasons": [{"phrase": r["phrase"], "direction": r["direction"]} for r in summary["reasons"]],
-        "request": {"amount": amount, "term_days": term},
-        "affordability": {"band": aff["band"], "share_of_monthly_income": aff["share_of_monthly_income"]},
+        "data_notes": list(summary["data_notes"]),
+        "request": {"amount": float(summary["request_amount"]), "term_days": float(summary["request_term"])},
+        "affordability": {"band": summary["affordability_band"]},
+        "eligibility": {"max_amount": el["max_amount"], "comfortable_amount": el["comfortable_amount"]},
     }
 
 
-def create_application(conn, vendor, lender_id, summary, amount=None, term=None, consent=False, now=None) -> dict:
-    """Send the summary snapshot to one lender. Requires the vendor's consent.
-
-    The reference is "A-" + (row id + 100), set in the same transaction as the insert: ids are unique, so two
-    applications sent at the same moment can never get the same reference (no COUNT query that could race)."""
-    auth.require_role(vendor, "vendor")
-    if not consent:
-        raise UserError("Tick the box to share this summary with the lender.")
-    lender = db.one(conn, select(users.c.id, users.c.org_name).where(
-        users.c.id == lender_id, users.c.role == "lender", users.c.is_active.is_(True)))
-    if lender is None:
-        raise UserError("Choose a lender.")
-    snap = snapshot(summary, amount, term)
+def _insert_application(conn, vendor, lender, snap: dict, now=None) -> dict:
+    """Store an application. The reference is "A-" + (row id + 100), set in the same transaction as the insert:
+    ids are unique, so two applications sent at the same moment can never share a reference."""
     created = db.utcnow(now)
     with db.transaction(conn):
-        check_id = summary.get("check_id")
-        if check_id is not None and conn.execute(select(score_checks.c.id).where(
-                score_checks.c.id == check_id, score_checks.c.user_id == vendor["id"])).first() is None:
-            check_id = None
         app_id = int(conn.execute(insert(applications).values(
-            vendor_id=vendor["id"], lender_id=lender["id"], check_id=check_id, snapshot_json=json.dumps(snap),
+            vendor_id=vendor["id"], lender_id=lender["id"], check_id=None, snapshot_json=json.dumps(snap),
             status="pending", created_at=created)).inserted_primary_key[0])
         ref = f"A-{REF_OFFSET + app_id}"
         conn.execute(update(applications).where(applications.c.id == app_id).values(ref=ref))
         db.audit(conn, "application_sent", actor_id=vendor["id"], target=ref, detail=f"lender:{lender['id']}", now=now)
     return {"id": app_id, "ref": ref, "lender": lender["org_name"], "status": "pending", "created_at": db.iso(created)}
+
+
+def submit_application(conn, user, lender_id, file, amount, term, consent, filename=None, now=None) -> dict:
+    """Apply for a loan: read the statement NOW, score it fresh with the requested amount and term, and check the
+    estimated eligibility of THAT result before anything is sent.
+
+    Returns {"outcome", "result", "max_amount", "application"}:
+      "sent"                    the application was stored (snapshot from this fresh scoring)
+      "not eligible"            nothing sent
+      "not enough income data"  nothing sent
+      "above limit"             nothing sent; max_amount says how much the vendor can apply for
+    Raises UserError without consent, for an unknown lender, a bad amount or term, or an unreadable file.
+    The statement is discarded after scoring, exactly as in Check score; nothing is saved as a score check."""
+    auth.require_role(user, "vendor")
+    if not consent:
+        raise UserError(MSG_CONSENT)
+    lender = db.one(conn, select(users.c.id, users.c.org_name).where(
+        users.c.id == lender_id, users.c.role == "lender", users.c.is_active.is_(True)))
+    if lender is None:
+        raise UserError("Choose a lender.")
+    amount, term = _positive(amount, "the amount"), _positive(term, "the number of days")
+    res, amount, term = _score_upload(file, filename, amount, term)
+    summary = _summary(res, amount, term, db.utcnow(now))
+    el = summary["eligibility"]
+    out = {"outcome": None, "result": summary, "max_amount": el["max_amount"], "application": None}
+    if el["status"] == "not_eligible":
+        out["outcome"] = OUTCOME_NOT_ELIGIBLE
+    elif el["status"] == "unknown":
+        out["outcome"] = OUTCOME_NO_INCOME
+    elif amount > el["max_amount"]:
+        out["outcome"] = OUTCOME_ABOVE_LIMIT
+    if out["outcome"] is not None:
+        db.audit(conn, "application_refused", actor_id=user["id"], detail=REFUSAL_CODES[out["outcome"]], now=now)
+        return out
+    out["outcome"] = OUTCOME_SENT
+    out["application"] = _insert_application(conn, user, lender, snapshot(summary), now)
+    return out
 
 
 def list_applications(conn, vendor_id) -> list:

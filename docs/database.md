@@ -20,6 +20,21 @@ errors show a fixed message instead. `data/private/`, `.env` and `.streamlit/sec
 Tables are created on first use, idempotently (`create_all` with `checkfirst`), so there is no migration step for a
 new database. There is no migration tool: a later schema change needs a fresh database or a manual `ALTER TABLE`.
 
+**Schema change (estimated eligibility):** `score_checks` has two new nullable columns, `max_amount` and
+`comfortable_amount`. `create_all` does not add columns to an existing table, so a database created before this
+change must be updated by hand:
+
+- local SQLite: stop the app, delete `data/private/app.db` (all data is simulated) and start the app again; it is
+  recreated with the new columns. Run `python scripts/create_demo_users.py` again.
+- PostgreSQL (Neon or Docker), keeping the data:
+
+  ```sql
+  ALTER TABLE score_checks ADD COLUMN max_amount DOUBLE PRECISION;
+  ALTER TABLE score_checks ADD COLUMN comfortable_amount DOUBLE PRECISION;
+  ```
+
+  Old saved checks then show "Not enough income data" until the vendor checks their score again.
+
 ## SQLite (default)
 
 Nothing to set up:

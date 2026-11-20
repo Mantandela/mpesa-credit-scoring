@@ -95,6 +95,8 @@ score_checks = Table(
     Column("monthly_income", Float),
     Column("affordability_band", Text, nullable=False),
     Column("rows_read", Integer, nullable=False),
+    Column("max_amount", Float),              # estimated eligibility (src/eligibility.py); NULL = not enough income data
+    Column("comfortable_amount", Float),
 )
 Index("ix_score_checks_user_id", score_checks.c.user_id)
 

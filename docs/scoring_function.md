@@ -68,6 +68,33 @@ Retraining is out of scope, so:
   last 90 days gets **unknown**. With income fixed, the ratio grows with the amount and the cutoffs are fixed, so a
   larger amount never gives a better band.
 
+## Estimated eligibility (PROTOTYPE POLICY)
+
+The web app adds an estimated loan limit to every score (`src/eligibility.py`; `score_statement` itself is unchanged):
+
+```
+max_amount         = tier_factor[tier] x stretched_cutoff x monthly_income      rounded DOWN to KES 100
+comfortable_amount = min(comfortable_cutoff x monthly_income, max_amount)       rounded DOWN to KES 100
+status             = "eligible" if max_amount > 0 else "not_eligible";  "unknown" if monthly income is missing or <= 0
+```
+
+- `tier_factor` (in `ELIGIBILITY_POLICY`): Low 0.50, Moderate 0.35, High 0.15, Very high 0 (never eligible).
+- The cutoffs are the affordability band cutoffs of `models/reference.json` (comfortable = 50th percentile, about
+  0.056; stretched = 85th percentile, about 0.419). They are read from the file, never hard-coded.
+- `monthly_income` is `affordability.amount_to_avg_monthly_income_90` turned back into KES: the vendor's average
+  monthly customer income over the last 90 days.
+- Example (the simulated vendor above: Moderate risk, about KES 164,300 a month): up to KES 24,100
+  (0.35 x 0.4194 x 164,304 = 24,118, rounded down), comfortable up to KES 9,200 (0.0564 x 164,304 = 9,261).
+
+**This is a placeholder policy for the prototype.** The tier factors are not taken from any lender's policy; monthly
+income is statement **turnover** (money received from customers), not profit; the cutoffs describe simulated
+applicants; and nothing here is validated on real repayment outcomes. The app says "The lender makes the final
+decision."
+
+In the app, Check score shows the estimate. Apply asks for the statement again, scores it fresh with the requested
+amount and term, and sends the application only if the fresh estimate is "eligible" and the amount is within
+`max_amount`. Otherwise it says why (above the limit, with the limit; not eligible; not enough income data).
+
 ## Output (example: a simulated vendor, 6-month statement, KES 5,000 for 14 days; numbers rounded)
 
 ```json
@@ -181,6 +208,8 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
 - **Affordability bands are relative to simulated applicants.** The cutoffs are percentiles of simulated requests
   against simulated incomes (the typical applicant asks for about 6% of their monthly income), so "stretched" can mean a loan that is
   small in absolute terms. Repayment is the amount only; fees, interest and the term are not modelled.
+- **Estimated eligibility is a prototype policy.** Placeholder tier factors, turnover instead of profit, cutoffs from
+  simulated applicants, no validation on repayment outcomes (see the section above).
 - **Thin history.** Below 90 days several features are missing and are filled with training medians (plus missing
   flags); the score leans on the population average. The `thin_history` warning says so.
 - **Reasons explain the model, not causes.** Grouping families and measure groups removes the obvious

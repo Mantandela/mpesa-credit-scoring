@@ -41,6 +41,21 @@ def status_text(label: str, on_hero: bool = False) -> str:
             f'{escape(str(label))}</span>')
 
 
+def colored_text(text: str, like: str) -> str:
+    """Any text in the colour of a status (e.g. "Not eligible right now" in the tier's colour). Text colour only."""
+    return f'<span class="status" style="color:{status_color(like)};font-weight:700">{escape(str(text))}</span>'
+
+
+def eligibility_lines(el: dict, tier: str) -> str:
+    """The eligibility block shared by Result and Reasons (HTML)."""
+    if el["status"] == "eligible":
+        return (f'<div class="elig-max">Up to {money(el["max_amount"])}</div>'
+                f'<div class="elig-comf">Comfortable up to {money(el["comfortable_amount"])}</div>')
+    if el["status"] == "not_eligible":
+        return f'<div class="elig-no">{colored_text("Not eligible right now", tier)}</div>'
+    return '<div class="elig-no" style="color:#6B6B85;font-weight:700">Not enough income data</div>'
+
+
 def status_md(label: str) -> str:
     """The same status as Streamlit markdown (for widget and expander labels, which cannot hold HTML)."""
     return f":{_MD_NAMES[status_color(label)]}[**{label}**]"

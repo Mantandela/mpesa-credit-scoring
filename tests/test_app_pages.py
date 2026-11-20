@@ -9,6 +9,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import app_helpers as H
+import toy
 from app import auth, components, db, service, theme
 
 PW = "correct-horse-1"
@@ -91,10 +92,23 @@ def test_vendor_signs_in_and_reaches_home(env):
     assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Score", "History", "Profile"]
 
 
+RICH = toy.make_vendor(days=120, daily_in=164000 / 30)       # Low risk under the toy model: eligible up to KES 34,300
+
+
+def _score(env, user, vendor=None):
+    return service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(vendor), "s.csv"))
+
+
+def _stored_application(env, user, result):
+    """An application as submit_application stores it (AppTest cannot upload a file to the Apply screen)."""
+    lender = {"id": env["lender"]["id"], "org_name": "Umoja SACCO"}
+    return service._insert_application(env["conn"], user, lender, service.snapshot(result))
+
+
 def test_home_with_a_score_and_applications(env):
     user, conn = env["vendor"], env["conn"]
-    result = service.run_score_check(conn, user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
-    sent = [service.create_application(conn, user, env["lender"]["id"], result, consent=True) for _ in range(4)]
+    result = _score(env, user)
+    sent = [_stored_application(env, user, result) for _ in range(4)]
     at = _app(user_id=user["id"], page="home")                  # no session result: the latest saved check is used
     _no_errors(at)
     text = _text(at)
@@ -113,7 +127,7 @@ def test_home_with_a_score_and_applications(env):
 
 def test_home_uses_the_session_result_when_checks_are_not_saved(env):
     user = service.update_profile_flags(env["conn"], env["vendor"]["id"], save_results=False)
-    result = service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
+    result = _score(env, user)
     assert result["check_id"] is None
     at = _app(user_id=user["id"], page="home", result=result)
     _no_errors(at)
@@ -182,16 +196,16 @@ def test_vendor_journey(env):
     uid = at.session_state["user_id"]
     user = auth.get_user(env["conn"], uid)
 
-    # the Score screen: prefilled with the median request
+    # the Score screen: upload only, no amount or days
     at.button(key="nav_score").click().run()
     _no_errors(at)
-    med = service.median_request()
-    assert (at.number_input(key="req_amount").value, at.number_input(key="req_term").value) == (int(med[0]), int(med[1]))
-    assert at.button(key="get_score").disabled                                     # nothing uploaded yet
+    assert not at.number_input and len(at.get("file_uploader")) == 1
+    assert at.button(key="get_score").label == "Get my score" and at.button(key="get_score").disabled
+    assert "Loan request" not in _text(at)
 
     # score twice (what "Get my score" calls), then continue on the Result screen
-    service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
-    result = service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(), "s.csv"), 7500, 14)
+    _score(env, user, RICH)
+    result = _score(env, user, RICH)
     at.session_state["result"] = result
     at.session_state["page"] = "result"
     at.run()
@@ -199,39 +213,50 @@ def test_vendor_journey(env):
     text = _text(at)
     assert "simulated data" not in text and "Prototype" not in text               # no prototype line on Result
     assert f"{result['score']} <span>/ 850</span>" in text and "Chance of default" in text
+    assert "Estimated eligibility" in text and "Up to KES 34,300" in text and "Comfortable up to KES 9,200" in text
+    assert "The lender makes the final decision." in text
     assert all(p["name"] in text for p in result["pillars"])
     assert "Score over time" in text                                               # two saved checks
+    assert at.button(key="to_apply").label == "Apply for a loan" and at.button(key="to_reasons").label == "See reasons"
 
-    # Reasons and loan: the slider changes only the band
+    # Reasons: top reasons, and the what-if slider changes only the band (never the score or the limit)
     at.button(key="to_reasons").click().run()
     _no_errors(at)
-    assert at.slider(key="loan_amount").value == 7500
+    med = service.median_request()
+    assert at.slider(key="loan_amount").value == int(med[0])
     before = _text(at)
-    assert all(r["phrase"] in before for r in result["reasons"])
+    assert all(r["phrase"] in before for r in result["reasons"]) and "Test an amount" in before
+    assert "Up to KES 34,300" in before
     at.slider(key="loan_amount").set_value(150000).run()
     _no_errors(at)
     after = _text(at)
-    assert "KES 150,000" in after and "Outside typical range" in after
+    assert "KES 150,000" in after and "Outside typical range" in after and "Up to KES 34,300" in after
     band = service.affordability_band(150000, result["monthly_income"])
     assert components.status_text(band.capitalize()) in after
     assert at.session_state["result"] == result                                    # never re-scored
 
-    # Apply to Umoja SACCO
-    at.button(key="to_apply").click().run()
+    # Apply: lender, amount and days (median request), the statement again, consent, one button
+    at.button(key="reasons_apply").click().run()
     _no_errors(at)
     radio = at.radio(key="apply_lender")
     assert sorted(radio.options) == ["Tumaini Microfinance", "Umoja SACCO"]       # organisation names are shown
-    radio.set_value(env["lender"]["id"])
-    assert at.button(key="send_application").disabled                              # consent first
-    at.checkbox(key="apply_consent").check().run()
-    at.button(key="send_application").click().run()
+    assert (at.number_input(key="apply_amount_in").value, at.number_input(key="apply_term_in").value) == \
+        (int(med[0]), int(med[1]))
+    assert len(at.get("file_uploader")) == 1
+    assert at.checkbox(key="apply_consent").label == "Share this summary with the lender"
+    send = at.button(key="send_application")
+    assert send.label == "Check eligibility and send" and send.disabled            # needs the statement and consent
+    # AppTest cannot upload a file: send the way the button does, then continue on the Sent screen
+    out = service.submit_application(env["conn"], user, env["lender"]["id"], H.Upload(H.statement_csv(RICH), "s.csv"),
+                                     20000, 30, True)
+    assert out["outcome"] == service.OUTCOME_SENT
+    at.session_state["sent"] = out["application"]
+    at.session_state["page"] = "sent"
+    at.run()
     _no_errors(at)
-    assert at.session_state["page"] == "sent"
     sent = at.session_state["sent"]
     text = _text(at)
     assert "Application sent" in text and "Umoja SACCO" in text and sent["ref"] in text and "Pending" in text
-    snap = H.rows(env["conn"], "applications", ref=sent["ref"])[0]["snapshot_json"]
-    assert '"amount": 150000.0' in snap                                            # the slider amount is the request
 
     # History: one line per application
     at.button(key="sent_history").click().run()
@@ -253,6 +278,47 @@ def test_vendor_journey(env):
     assert at.session_state["page"] == "signin" and "user_id" not in at.session_state
 
 
+def test_result_for_a_very_high_risk_vendor(env):
+    result = _score(env, env["vendor"])                       # the default toy statement is Very high risk
+    assert result["tier"] == "Very high risk"
+    at = _app(user_id=env["vendor"]["id"], page="result", result=result)
+    _no_errors(at)
+    text = _text(at)
+    assert components.colored_text("Not eligible right now", "Very high risk") in text
+    assert "Estimated eligibility" not in text and "Up to KES" not in text
+    at.button(key="see_why").click().run()
+    assert at.session_state["page"] == "reasons" and "Not eligible right now" in _text(at)
+
+
+def test_result_without_income_data(env):
+    no_income = toy.recompute_balance(toy.make_vendor()[lambda d: d.paid_in == 0].reset_index(drop=True), opening=50000.0)
+    result = _score(env, env["vendor"], no_income)
+    at = _app(user_id=env["vendor"]["id"], page="result", result=result)
+    _no_errors(at)
+    assert "Not enough income data" in _text(at) and "Up to KES" not in _text(at)
+
+
+@pytest.mark.parametrize("msg, shown, see_why", [
+    (("above", "You can apply for up to KES 34,300. Lower the amount and try again."),
+     "You can apply for up to KES 34,300. Lower the amount and try again.", False),
+    (("not_eligible", "Not eligible right now."), "Not eligible right now.", True),
+    (("no_income", "Not enough income data."), "Not enough income data.", False),
+    (("error", "This PDF has no selectable text. Please upload the Excel or CSV statement."),
+     "This PDF has no selectable text. Please upload the Excel or CSV statement.", False),
+])
+def test_apply_outcome_lines(env, msg, shown, see_why):
+    at = _app(user_id=env["vendor"]["id"], page="apply", apply_msg=msg)
+    _no_errors(at)
+    assert shown in _text(at) and at.session_state["page"] == "apply"
+    assert any(b.key == "apply_see_why" for b in at.button) == see_why
+    assert len(at.get("file_uploader")) == 1                  # the statement is asked for again
+
+
+def test_apply_page_never_keeps_the_statement():
+    src = (H.ROOT / "app" / "pages" / "apply.py").read_text(encoding="utf-8")
+    assert "apply_upload_n" in src and src.count('st.session_state["apply_upload_n"] = n + 1') >= 2
+
+
 # ---------------------------------------------------------------- design rules
 def test_status_text_is_coloured_text_only():
     for label in components.STATUS_COLORS:
@@ -272,8 +338,8 @@ def test_no_emoji_anywhere(env, models):
         assert not EMOJI.search(p.read_text(encoding="utf-8")), p
     assert not EMOJI.search((H.ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
     user = env["vendor"]
-    result = service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
-    service.create_application(env["conn"], user, env["lender"]["id"], result, consent=True)
+    result = _score(env, user, RICH)
+    _stored_application(env, user, result)
     seen = []
     for page in (*VENDOR_PAGES, "sent"):
         at = _app(user_id=user["id"], page=page, result=result,

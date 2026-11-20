@@ -1,10 +1,13 @@
-"""Result: score, tier, chance of default, score over time, the seven areas."""
+"""Result: score, tier, chance of default, estimated eligibility, score over time, the seven areas."""
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from app import components as ui, service, theme
 from app.pages import current_result
+
+FINAL_DECISION = "The lender makes the final decision."
+
 
 def _chart(history) -> alt.Chart:
     df = pd.DataFrame(history, columns=["Date", "Score"])
@@ -29,6 +32,16 @@ def render(conn, user) -> None:
         return
     ui.hero(result["score"], result["tier"], f"Chance of default {ui.pct(result['pd'])}")
 
+    el = result["eligibility"]
+    with st.container(key="card_eligibility"):
+        if el["status"] == "eligible":
+            ui.section("Estimated eligibility")
+        ui.html(ui.eligibility_lines(el, result["tier"]))
+        if el["status"] == "eligible":
+            ui.muted(FINAL_DECISION)
+        elif el["status"] == "not_eligible":
+            st.button("See why", key="see_why", type="tertiary", on_click=ui.go, args=("reasons",))
+
     history = service.score_history(conn, user["id"])
     if len(history) >= 2:
         with st.container(key="card_trend"):
@@ -39,5 +52,5 @@ def render(conn, user) -> None:
         ui.section("Your seven areas")
         ui.html("".join(ui.row(p["name"], ui.status_text(p["label"]), f'<span class="num">{i}</span>')
                         for i, p in enumerate(result["pillars"], start=1)))
-    st.button("See reasons and loan check", type="primary", key="to_reasons", on_click=ui.go, args=("reasons",),
-              width="stretch")
+    st.button("Apply for a loan", type="primary", key="to_apply", on_click=ui.go, args=("apply",), width="stretch")
+    st.button("See reasons", key="to_reasons", on_click=ui.go, args=("reasons",), width="stretch")
