@@ -4,7 +4,8 @@ Passwords come from environment variables, or are generated at random and printe
 are not saved in plain text anywhere). No password is hard-coded. Existing accounts are left unchanged.
 
     DEMO_VENDOR_PASSWORD, DEMO_UMOJA_PASSWORD, DEMO_TUMAINI_PASSWORD, DEMO_ADMIN_PASSWORD   (optional, >= 10 characters)
-    APP_DB_PATH                                                                            (optional, default data/private/app.db)
+    DATABASE_URL     (optional: PostgreSQL, e.g. Neon; never printed)
+    APP_DB_PATH      (optional: the SQLite file when DATABASE_URL is not set; default data/private/app.db)
 
 Run from the repo root:  python scripts/create_demo_users.py
 """
@@ -32,23 +33,31 @@ def create_demo_users(conn, env=None) -> list:
     env = os.environ if env is None else env
     out = []
     for email, name, role, org, var in DEMO_USERS:
-        if db.one(conn, "SELECT 1 FROM users WHERE email = ?", (email,)):
+        if auth.find_user_id(conn, email) is not None:
             out.append((email, role, None, "exists"))
             continue
         given = env.get(var)
         password = given or secrets.token_urlsafe(12)
-        auth.create_user(conn, email, name, password, role, org_name=org)
+        try:
+            auth.create_user(conn, email, name, password, role, org_name=org)
+        except auth.AuthError:                 # created at the same moment by another run
+            out.append((email, role, None, "exists"))
+            continue
         out.append((email, role, None if given else password, "created"))
     return out
 
 
 def main():
-    conn = db.connect()
+    url = db.database_url()
+    engine = db.get_engine(url)
+    conn = db.connect(engine)
     try:
         rows = create_demo_users(conn)
     finally:
         conn.close()
-    print(f"database: {db.db_path().as_posix()}")
+        engine.dispose()
+    where = db.db_path().as_posix() if db.backend_name(url) == "sqlite" else "PostgreSQL from DATABASE_URL (not shown)"
+    print(f"database: {where}")
     for email, role, password, what in rows:
         shown = password if password else ("(from environment)" if what == "created" else "(unchanged)")
         print(f"{what:8} {role:7} {email:24} {shown}")

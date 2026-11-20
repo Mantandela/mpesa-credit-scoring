@@ -1,4 +1,6 @@
-"""Home: greeting, latest score, quick actions, latest application, score breakdown."""
+"""Home: top bar with greeting, score hero, quick actions, latest application, score breakdown."""
+from html import escape
+
 import streamlit as st
 
 from app import components as ui, service
@@ -6,32 +8,30 @@ from app.pages import current_result
 
 
 def render(conn, user) -> None:
-    first = (user["name"] or "").split()[0] if user["name"] else ""
-    ui.title(f"{ui.greeting()}, {first}")
+    ui.top_bar(user, home=True)
     result = current_result(conn, user)
     if result is None:
-        with st.container(key="card_cta"):
-            ui.section("Check your score")
-            ui.muted("Upload your M-Pesa statement to start.")
-            st.button("Check your score", type="primary", key="cta_score", on_click=ui.go, args=("score",), width="stretch")
-        return
+        ui.hero(cta=True)
+    else:
+        ui.hero(result["score"], result["tier"])
 
-    ui.hero(result["score"], result["tier"])
-    with st.container(key="quick_actions"):
-        cols = st.columns(4)
-        actions = (("qa_score", "Check score", ":material/speed:", "score"),
-                   ("qa_loan", "Loan check", ":material/payments:", "reasons"),
-                   ("qa_history", "History", ":material/receipt_long:", "history"),
-                   ("qa_more", "More", ":material/more_horiz:", "profile"))
-        for col, (key, label, ico, page) in zip(cols, actions):
-            with col:
-                st.button(label, key=key, icon=ico, on_click=ui.go, args=(page,), width="stretch")
+    with st.container(horizontal=True, key="quick_actions"):
+        for key, label, page in (("qa_score", "Check score", "score"),
+                                 ("qa_loan", "Loan check", "reasons" if result else "score"),
+                                 ("qa_history", "History", "history"),
+                                 ("qa_more", "More", "profile")):
+            st.button(label, key=key, on_click=ui.go, args=(page,), width="stretch")
 
+    ui.section("Latest application")
     apps = service.list_applications(conn, user["id"])
-    with st.container(key="card_home_rows"):
+    with st.container(key="card_latest"):
         if apps:
-            ui.html('<div class="muted">Latest application</div>')
             a = apps[0]
             st.button(f"{a['lender']}  {ui.status_md(a['status'].capitalize())}", key="row_latest_app",
                       on_click=ui.go, args=("history",), width="stretch")
-        st.button("Score breakdown", key="row_breakdown", on_click=ui.go, args=("result",), width="stretch")
+        else:
+            ui.html(f'<div class="muted">{escape("No applications yet")}</div>')
+
+    if result is not None:
+        with st.container(key="card_breakdown"):
+            st.button("Score breakdown", key="row_breakdown", on_click=ui.go, args=("result",), width="stretch")

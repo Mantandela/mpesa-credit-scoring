@@ -1,5 +1,8 @@
 """All app logic, free of any UI code. Pages call these functions and only render the results.
 
+Every function takes the database connection first (app/db.py: SQLite or PostgreSQL through SQLAlchemy Core). A
+function that writes more than one row does so in ONE transaction.
+
 Scoring goes through src/predict.py: the score, chance of default, tier, pillar ratings and reasons are evaluated at
 the MEDIAN request (predict.py does this); the typed amount and term feed only the affordability check, as typed.
 
@@ -17,6 +20,8 @@ import sys
 import threading
 from pathlib import Path
 
+from sqlalchemy import delete, insert, select, update
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
@@ -25,6 +30,7 @@ import predict as P  # noqa: E402
 from pdf_statement import NoTextLayerError, PasswordError, StatementError  # noqa: E402
 
 from app import auth, db  # noqa: E402
+from app.db import applications, score_checks, users  # noqa: E402
 
 ALLOWED_EXTENSIONS = (".xlsx", ".xls", ".csv", ".pdf")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -39,6 +45,7 @@ PILLAR_NAMES = {
 }
 SNAPSHOT_KEYS = ("score", "tier", "pd", "pillars", "reasons", "request", "affordability")
 PROFILE_FLAGS = ("share_with_lenders", "save_results", "email_notifications")
+REF_OFFSET = 100                     # application reference = "A-" + (row id + 100): A-101, A-102, ...
 
 MSG_TYPE = "Upload an Excel (.xlsx, .xls) or CSV statement, or a PDF with selectable text."
 MSG_SIZE = "The file is larger than 10 MB."
@@ -124,8 +131,9 @@ def affordability(amount, monthly_income, ref: dict | None = None) -> dict:
 def register_vendor(conn, name, email, password, confirm, now=None) -> dict:
     """Self-registration (vendors only). Returns the new user."""
     auth.check_new_password(password, confirm)
-    uid = auth.create_user(conn, email, name, password, "vendor", now=now)
-    db.audit(conn, "register", actor_id=uid, target=f"user:{uid}", now=now)
+    with db.transaction(conn):                      # the user and its audit row, together
+        uid = auth.create_user(conn, email, name, password, "vendor", now=now)
+        db.audit(conn, "register", actor_id=uid, target=f"user:{uid}", now=now)
     return auth.get_user(conn, uid)
 
 
@@ -135,8 +143,7 @@ def authenticate(conn, email, password, now=None) -> dict:
     try:
         user = auth.authenticate(conn, email, password, now=now)
     except auth.AuthError as e:
-        row = db.one(conn, "SELECT id FROM users WHERE email = ?", ((email or "").strip().lower(),))
-        db.audit(conn, "sign_in_failed", actor_id=row["id"] if row else None,
+        db.audit(conn, "sign_in_failed", actor_id=auth.find_user_id(conn, email),
                  detail="locked" if str(e) == auth.ACCOUNT_LOCKED else None, now=now)
         raise
     db.audit(conn, "sign_in", actor_id=user["id"], now=now)
@@ -147,14 +154,16 @@ def update_profile_flags(conn, user_id, **flags) -> dict:
     unknown = set(flags) - set(PROFILE_FLAGS)
     if unknown:
         raise ValueError(f"unknown profile flags: {sorted(unknown)}")
-    for k, v in flags.items():                     # column names come from the fixed PROFILE_FLAGS list
-        db.write(conn, f"UPDATE users SET {k} = ? WHERE id = ?", (1 if v else 0, user_id))
+    if flags:
+        with db.transaction(conn):
+            conn.execute(update(users).where(users.c.id == user_id).values(**{k: bool(v) for k, v in flags.items()}))
     return auth.get_user(conn, user_id)
 
 
 def change_password(conn, user, current, new, confirm) -> None:
-    auth.change_password(conn, user["id"], current, new, confirm)
-    db.audit(conn, "password_changed", actor_id=user["id"])
+    with db.transaction(conn):
+        auth.change_password(conn, user["id"], current, new, confirm)
+        db.audit(conn, "password_changed", actor_id=user["id"])
 
 
 # ------------------------------------------------------------------ score check
@@ -195,13 +204,13 @@ def _phrase(label: str) -> str:
     return label[:1].upper() + label[1:]
 
 
-def _summary(res: dict, amount: float, term: float, now=None) -> dict:
+def _summary(res: dict, amount: float, term: float, created) -> dict:
     aff = res["affordability"]
     ratio = aff["amount_to_avg_monthly_income_90"]
     codes = [w["code"] for w in res["warnings"]]
     return {
         "check_id": None,
-        "created_at": db.utcnow_iso(now),
+        "created_at": db.iso(created),
         "score": int(res["score"]),
         "pd": float(res["probability_of_default"]),
         "tier": res["tier"],
@@ -247,22 +256,24 @@ def run_score_check(conn, user, file, amount, term, filename=None, now=None) -> 
         raise UserError(MSG_UNREADABLE) from None
     finally:
         data = None
-    summary = _summary(res, amount, term, now)
-    if user.get("save_results"):
-        summary["check_id"] = db.write(
-            conn, "INSERT INTO score_checks (user_id, created_at, score, pd, tier, pillars_json, reasons_json, "
-                  "data_notes_json, request_amount, request_term, monthly_income, affordability_band, rows_read) "
-                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user["id"], summary["created_at"], summary["score"], summary["pd"], summary["tier"],
-             json.dumps(summary["pillars"]), json.dumps(summary["reasons"]), json.dumps(summary["data_notes"]),
-             amount, term, summary["monthly_income"], summary["affordability_band"], summary["rows_read"]))
-    db.audit(conn, "score_check", actor_id=user["id"],
-             target=f"check:{summary['check_id']}" if summary["check_id"] else "not_saved", now=now)
+    created = db.utcnow(now)
+    summary = _summary(res, amount, term, created)
+    with db.transaction(conn):                     # the saved check and its audit row, together
+        if user.get("save_results"):
+            r = conn.execute(insert(score_checks).values(
+                user_id=user["id"], created_at=created, score=summary["score"], pd=summary["pd"], tier=summary["tier"],
+                pillars_json=json.dumps(summary["pillars"]), reasons_json=json.dumps(summary["reasons"]),
+                data_notes_json=json.dumps(summary["data_notes"]), request_amount=amount, request_term=term,
+                monthly_income=summary["monthly_income"], affordability_band=summary["affordability_band"],
+                rows_read=summary["rows_read"]))
+            summary["check_id"] = int(r.inserted_primary_key[0])
+        db.audit(conn, "score_check", actor_id=user["id"],
+                 target=f"check:{summary['check_id']}" if summary["check_id"] else "not_saved", now=now)
     return summary
 
 
-def _check_from_row(row) -> dict:
-    return {"check_id": row["id"], "created_at": row["created_at"], "score": row["score"], "pd": row["pd"],
+def _check_from_row(row: dict) -> dict:
+    return {"check_id": row["id"], "created_at": db.iso(row["created_at"]), "score": row["score"], "pd": row["pd"],
             "tier": row["tier"], "pillars": json.loads(row["pillars_json"]), "reasons": json.loads(row["reasons_json"]),
             "data_notes": json.loads(row["data_notes_json"]), "request_amount": row["request_amount"],
             "request_term": row["request_term"], "monthly_income": row["monthly_income"],
@@ -271,27 +282,33 @@ def _check_from_row(row) -> dict:
 
 
 def latest_check(conn, user_id) -> dict | None:
-    row = db.one(conn, "SELECT * FROM score_checks WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 1", (user_id,))
+    row = db.one(conn, select(score_checks).where(score_checks.c.user_id == user_id)
+                 .order_by(score_checks.c.created_at.desc(), score_checks.c.id.desc()).limit(1))
     return _check_from_row(row) if row else None
 
 
 def score_history(conn, user_id) -> list:
-    """[(created_at, score)] of the saved checks, oldest first."""
-    return [(r["created_at"], r["score"]) for r in
-            db.all_rows(conn, "SELECT created_at, score FROM score_checks WHERE user_id = ? ORDER BY created_at, id", (user_id,))]
+    """[(created_at ISO string, score)] of the saved checks, oldest first."""
+    rows = db.all_rows(conn, select(score_checks.c.created_at, score_checks.c.score)
+                       .where(score_checks.c.user_id == user_id).order_by(score_checks.c.created_at, score_checks.c.id))
+    return [(db.iso(r["created_at"]), r["score"]) for r in rows]
 
 
 def delete_saved_results(conn, user, now=None) -> int:
     """Delete all saved score checks of the user. Applications keep their own snapshot (check_id becomes NULL)."""
-    n = db.write(conn, "DELETE FROM score_checks WHERE user_id = ?", (user["id"],))
-    db.audit(conn, "delete_saved_results", actor_id=user["id"], target=f"user:{user['id']}", detail=f"checks={n}", now=now)
-    return n
+    with db.transaction(conn):
+        conn.execute(update(applications).where(applications.c.check_id.in_(
+            select(score_checks.c.id).where(score_checks.c.user_id == user["id"]))).values(check_id=None))
+        n = conn.execute(delete(score_checks).where(score_checks.c.user_id == user["id"])).rowcount
+        db.audit(conn, "delete_saved_results", actor_id=user["id"], target=f"user:{user['id']}", detail=f"checks={n}",
+                 now=now)
+    return int(n)
 
 
 # ------------------------------------------------------------------ lenders and applications
 def list_lenders(conn) -> list:
-    return [dict(r) for r in db.all_rows(
-        conn, "SELECT id, org_name FROM users WHERE role = 'lender' AND is_active = 1 ORDER BY org_name, id")]
+    return db.all_rows(conn, select(users.c.id, users.c.org_name)
+                       .where(users.c.role == "lender", users.c.is_active.is_(True)).order_by(users.c.org_name, users.c.id))
 
 
 def snapshot(summary: dict, amount=None, term=None) -> dict:
@@ -312,37 +329,43 @@ def snapshot(summary: dict, amount=None, term=None) -> dict:
 
 
 def create_application(conn, vendor, lender_id, summary, amount=None, term=None, consent=False, now=None) -> dict:
-    """Send the summary snapshot to one lender. Requires the vendor's consent."""
+    """Send the summary snapshot to one lender. Requires the vendor's consent.
+
+    The reference is "A-" + (row id + 100), set in the same transaction as the insert: ids are unique, so two
+    applications sent at the same moment can never get the same reference (no COUNT query that could race)."""
     auth.require_role(vendor, "vendor")
     if not consent:
         raise UserError("Tick the box to share this summary with the lender.")
-    lender = db.one(conn, "SELECT id, org_name FROM users WHERE id = ? AND role = 'lender' AND is_active = 1", (lender_id,))
+    lender = db.one(conn, select(users.c.id, users.c.org_name).where(
+        users.c.id == lender_id, users.c.role == "lender", users.c.is_active.is_(True)))
     if lender is None:
         raise UserError("Choose a lender.")
     snap = snapshot(summary, amount, term)
-    check_id = summary.get("check_id")
-    if check_id is not None and not db.one(conn, "SELECT 1 FROM score_checks WHERE id = ? AND user_id = ?",
-                                           (check_id, vendor["id"])):
-        check_id = None
-    created = db.utcnow_iso(now)
-    with conn:
-        cur = conn.execute("INSERT INTO applications (vendor_id, lender_id, check_id, snapshot_json, status, created_at) "
-                           "VALUES (?, ?, ?, ?, 'pending', ?)", (vendor["id"], lender["id"], check_id, json.dumps(snap), created))
-        app_id = cur.lastrowid
-        ref = f"A-{100 + app_id}"
-        conn.execute("UPDATE applications SET ref = ? WHERE id = ?", (ref, app_id))
-    db.audit(conn, "application_sent", actor_id=vendor["id"], target=ref, detail=f"lender:{lender['id']}", now=now)
-    return {"id": app_id, "ref": ref, "lender": lender["org_name"], "status": "pending", "created_at": created}
+    created = db.utcnow(now)
+    with db.transaction(conn):
+        check_id = summary.get("check_id")
+        if check_id is not None and conn.execute(select(score_checks.c.id).where(
+                score_checks.c.id == check_id, score_checks.c.user_id == vendor["id"])).first() is None:
+            check_id = None
+        app_id = int(conn.execute(insert(applications).values(
+            vendor_id=vendor["id"], lender_id=lender["id"], check_id=check_id, snapshot_json=json.dumps(snap),
+            status="pending", created_at=created)).inserted_primary_key[0])
+        ref = f"A-{REF_OFFSET + app_id}"
+        conn.execute(update(applications).where(applications.c.id == app_id).values(ref=ref))
+        db.audit(conn, "application_sent", actor_id=vendor["id"], target=ref, detail=f"lender:{lender['id']}", now=now)
+    return {"id": app_id, "ref": ref, "lender": lender["org_name"], "status": "pending", "created_at": db.iso(created)}
 
 
 def list_applications(conn, vendor_id) -> list:
-    rows = db.all_rows(conn, "SELECT a.id, a.ref, a.status, a.lender_note, a.created_at, a.decided_at, a.snapshot_json, "
-                             "u.org_name FROM applications a JOIN users u ON u.id = a.lender_id "
-                             "WHERE a.vendor_id = ? ORDER BY a.created_at DESC, a.id DESC", (vendor_id,))
+    a = applications
+    rows = db.all_rows(conn, select(a.c.id, a.c.ref, a.c.status, a.c.lender_note, a.c.created_at, a.c.decided_at,
+                                    a.c.snapshot_json, users.c.org_name)
+                       .join_from(a, users, users.c.id == a.c.lender_id)
+                       .where(a.c.vendor_id == vendor_id).order_by(a.c.created_at.desc(), a.c.id.desc()))
     out = []
     for r in rows:
         snap = json.loads(r["snapshot_json"])
         out.append({"id": r["id"], "ref": r["ref"], "status": r["status"], "lender": r["org_name"],
-                    "lender_note": r["lender_note"], "created_at": r["created_at"], "decided_at": r["decided_at"],
+                    "lender_note": r["lender_note"], "created_at": db.iso(r["created_at"]), "decided_at": db.iso(r["decided_at"]),
                     "request": snap["request"], "score": snap["score"], "tier": snap["tier"]})
     return out

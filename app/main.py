@@ -4,6 +4,9 @@
 
 Screens are routed through st.session_state["page"]; every screen declares the role it needs and the router applies
 the role guard before rendering. Prototype: all scores come from a model trained on simulated data.
+
+Database: DATABASE_URL (environment or st.secrets) selects PostgreSQL, e.g. Neon; otherwise SQLite at
+data/private/app.db. See docs/database.md.
 """
 import sys
 from pathlib import Path
@@ -42,10 +45,21 @@ def _warm_up_once():
     return True
 
 
+@st.cache_resource(show_spinner=False)
+def _engine(url: str):
+    """One engine per database per process (tables created on first use). The URL is a cache key only."""
+    return db.get_engine(url)
+
+
 def run() -> None:
     theme.inject()
     _warm_up_once()
-    conn = db.connect()
+    try:
+        conn = db.connect(_engine(db.database_url()))    # one connection per run, closed below
+    except db.DatabaseUnavailable as e:
+        ui.title("Not available")
+        ui.alert(str(e))
+        return
     try:
         user = auth.get_user(conn, st.session_state.get("user_id"))
         if user is not None and not user["is_active"]:
@@ -75,5 +89,10 @@ def run() -> None:
         conn.close()
 
 
-st.set_page_config(page_title="Vendor credit score", layout="centered", initial_sidebar_state="collapsed")
-st.navigation([st.Page(run, title="Vendor credit score", default=True)], position="hidden").run()
+@st.cache_resource(show_spinner=False)
+def _favicon():
+    return theme.favicon()
+
+
+st.set_page_config(page_title=ui.APP_NAME, page_icon=_favicon(), layout="centered", initial_sidebar_state="collapsed")
+st.navigation([st.Page(run, title=ui.APP_NAME, default=True)], position="hidden").run()

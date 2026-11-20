@@ -5,10 +5,16 @@ the REAL affordability cutoffs of the trained model (50th / 85th percentile 0.05
 numbers the app shows. statement_csv() writes a synthetic statement with made-up names and phone numbers in the
 details, to check that none of it reaches the database, the audit log or the result.
 """
+import os
 import sys
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import joblib
+import pytest
+from sqlalchemy import select
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -65,11 +71,63 @@ class Upload:
         return self._data
 
 
+def rows(conn, table: str, order_by: str = "id", **where) -> list:
+    """All rows of a table as dicts, filtered by column equality (SQLAlchemy Core, works on both databases)."""
+    from app import db
+    t = db.TABLES[table]
+    stmt = select(t).order_by(t.c[order_by])
+    for k, v in where.items():
+        stmt = stmt.where(t.c[k] == v)
+    return db.all_rows(conn, stmt)
+
+
 def all_text(conn) -> str:
     """Every value in every table, as one string (for privacy checks). Password hashes and salts are left out: they
     are random hex and can contain digit runs that look like phone numbers."""
     out = []
     for t in ("users", "score_checks", "applications", "audit_log"):
-        for r in conn.execute(f"SELECT * FROM {t}"):
-            out.extend(str(r[k]) for k in r.keys() if k not in ("password_hash", "salt"))
+        for r in rows(conn, t):
+            out.extend(str(v) for k, v in r.items() if k not in ("password_hash", "salt"))
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------- database backends for the tests
+# The default run uses SQLite only. Tests parametrised with BACKENDS also run on PostgreSQL when DATABASE_URL points
+# at one (they are marked `postgres` and skipped otherwise). Each PostgreSQL test gets its own throw-away schema
+# (search_path), so the tests never touch existing tables, even if DATABASE_URL points at a real database.
+BACKENDS = ["sqlite", pytest.param("postgres", marks=pytest.mark.postgres)]
+
+
+def postgres_url():
+    from app import db
+    url = os.environ.get("DATABASE_URL")
+    if url and db.backend_name(db.normalise_url(url)) == "postgresql":
+        return db.normalise_url(url)
+    return None
+
+
+@contextmanager
+def database(backend: str, tmp_path: Path):
+    """An engine on an empty database with the app schema: a SQLite file in tmp_path, or a new PostgreSQL schema."""
+    from app import db
+    admin, schema = None, None
+    if backend == "sqlite":
+        engine = db.make_engine("sqlite:///" + (tmp_path / "private" / "app.db").as_posix())
+    else:
+        url = postgres_url()
+        if url is None:
+            pytest.skip("set DATABASE_URL to a PostgreSQL database to run the postgres tests")
+        schema = "apptest_" + uuid.uuid4().hex[:12]
+        admin = db.make_engine(url)
+        with admin.begin() as c:
+            c.execute(CreateSchema(schema))
+        engine = db.make_engine(url, search_path=schema)
+    db.create_schema(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+        if admin is not None:
+            with admin.begin() as c:
+                c.execute(DropSchema(schema, cascade=True))
+            admin.dispose()

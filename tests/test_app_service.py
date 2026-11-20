@@ -4,6 +4,7 @@ Uses a toy model trained in a temporary folder (tests/app_helpers.py) and synthe
 """
 import json
 import re
+import threading
 
 import pytest
 
@@ -21,17 +22,18 @@ def models(tmp_path_factory):
     return H.build_app_models(tmp_path_factory.mktemp("app_models"))
 
 
-@pytest.fixture
-def env(models, tmp_path, monkeypatch):
+@pytest.fixture(params=H.BACKENDS)
+def env(request, models, tmp_path, monkeypatch):
+    """SQLite always; PostgreSQL too when DATABASE_URL points at one (marked `postgres`)."""
     monkeypatch.setenv("APP_MODEL_PATH", str(models["model"]))
     monkeypatch.setenv("APP_REFERENCE_PATH", str(models["ref"]))
-    monkeypatch.setenv("APP_DB_PATH", str(tmp_path / "app.db"))
-    conn = db.connect()
-    vendor = service.register_vendor(conn, "Test Vendor", "vendor@example.com", PW, PW)
-    lender_id = auth.create_user(conn, "umoja@example.com", "Umoja desk", PW, "lender", org_name="Umoja SACCO")
-    auth.create_user(conn, "tumaini@example.com", "Tumaini desk", PW, "lender", org_name="Tumaini Microfinance")
-    yield {"conn": conn, "vendor": vendor, "lender_id": lender_id, "models": models, "tmp": tmp_path}
-    conn.close()
+    with H.database(request.param, tmp_path) as engine:
+        conn = db.connect(engine)
+        vendor = service.register_vendor(conn, "Test Vendor", "vendor@example.com", PW, PW)
+        lender_id = auth.create_user(conn, "umoja@example.com", "Umoja desk", PW, "lender", org_name="Umoja SACCO")
+        auth.create_user(conn, "tumaini@example.com", "Tumaini desk", PW, "lender", org_name="Tumaini Microfinance")
+        yield {"conn": conn, "engine": engine, "vendor": vendor, "lender_id": lender_id, "models": models, "tmp": tmp_path}
+        conn.close()
 
 
 @pytest.fixture(scope="module")
@@ -52,10 +54,10 @@ def test_score_check_returns_the_summary_and_saves_it(env, csv_bytes):
     assert all(p["label"] in {"Weak", "Fair", "Good", "Strong"} for p in s["pillars"])
     assert 1 <= len(s["reasons"]) <= 5 and all(r["direction"] in {"Raises risk", "Lowers risk"} for r in s["reasons"])
     assert s["rows_read"] > 100 and s["monthly_income"] > 0 and s["check_id"] is not None
-    row = env["conn"].execute("SELECT * FROM score_checks WHERE id = ?", (s["check_id"],)).fetchone()
+    row, = H.rows(env["conn"], "score_checks", id=s["check_id"])
     assert row["score"] == s["score"] and row["user_id"] == env["vendor"]["id"] and row["rows_read"] == s["rows_read"]
     assert service.latest_check(env["conn"], env["vendor"]["id"])["score"] == s["score"]
-    audit = env["conn"].execute("SELECT * FROM audit_log WHERE action = 'score_check'").fetchall()
+    audit = H.rows(env["conn"], "audit_log", action="score_check")
     assert len(audit) == 1 and audit[0]["target"] == f"check:{s['check_id']}"
 
 
@@ -85,8 +87,8 @@ def test_save_results_off_stores_nothing(env, csv_bytes):
     user = service.update_profile_flags(env["conn"], env["vendor"]["id"], save_results=False)
     s = _check(env, csv_bytes, user=user)
     assert s["check_id"] is None and s["score"]
-    assert env["conn"].execute("SELECT COUNT(*) FROM score_checks").fetchone()[0] == 0
-    assert env["conn"].execute("SELECT target FROM audit_log WHERE action = 'score_check'").fetchone()[0] == "not_saved"
+    assert db.count(env["conn"], "score_checks") == 0
+    assert [r["target"] for r in H.rows(env["conn"], "audit_log", action="score_check")] == ["not_saved"]
 
 
 def test_only_vendors_can_score(env, csv_bytes):
@@ -125,7 +127,8 @@ def test_create_application_stores_only_the_summary_snapshot(env, csv_bytes):
         service.create_application(env["conn"], env["vendor"], env["lender_id"], s, consent=False)
     sent = service.create_application(env["conn"], env["vendor"], env["lender_id"], s, amount=20000, term=30, consent=True)
     assert re.fullmatch(r"A-\d{3,}", sent["ref"]) and sent["lender"] == "Umoja SACCO" and sent["status"] == "pending"
-    row = env["conn"].execute("SELECT * FROM applications WHERE id = ?", (sent["id"],)).fetchone()
+    row, = H.rows(env["conn"], "applications", id=sent["id"])
+    assert row["ref"] == f"A-{100 + sent['id']}" and row["status"] == "pending"
     snap = json.loads(row["snapshot_json"])
     assert tuple(snap) == service.SNAPSHOT_KEYS
     assert snap["score"] == s["score"] and snap["tier"] == s["tier"] and snap["pd"] == s["pd"]
@@ -141,6 +144,37 @@ def test_create_application_stores_only_the_summary_snapshot(env, csv_bytes):
         service.create_application(env["conn"], env["vendor"], env["vendor"]["id"], s, consent=True)   # not a lender
 
 
+def test_two_vendors_applying_at_the_same_time_get_different_references(env):
+    """Two vendors, each on its own connection, send 5 applications at the same moment (a barrier releases them
+    together). References come from the row id, so all 10 differ and match their rows."""
+    second = service.register_vendor(env["conn"], "Second Vendor", "second@example.com", PW, PW)
+    summary = {"check_id": None, "score": 640, "pd": 0.11, "tier": "Moderate risk", "pillars": [], "reasons": [],
+               "request_amount": 5000.0, "request_term": 14.0, "monthly_income": 60000.0}
+    barrier, refs, errors = threading.Barrier(2), [], []
+
+    def send(vendor):
+        conn = db.connect(env["engine"])
+        try:
+            barrier.wait()
+            for _ in range(5):
+                refs.append(service.create_application(conn, vendor, env["lender_id"], summary, consent=True)["ref"])
+        except Exception as e:      # noqa: BLE001
+            errors.append(e)
+        finally:
+            conn.close()
+    threads = [threading.Thread(target=send, args=(v,)) for v in (env["vendor"], second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert len(refs) == 10 and len(set(refs)) == 10
+    stored = H.rows(env["conn"], "applications")
+    assert sorted(r["ref"] for r in stored) == sorted(refs)
+    assert all(r["ref"] == f"A-{100 + r['id']}" for r in stored)
+    assert {r["vendor_id"] for r in stored} == {env["vendor"]["id"], second["id"]}
+
+
 def test_list_lenders_shows_organisations(env):
     assert [l["org_name"] for l in service.list_lenders(env["conn"])] == ["Tumaini Microfinance", "Umoja SACCO"]
 
@@ -152,9 +186,9 @@ def test_delete_saved_results(env, csv_bytes):
     assert len(service.score_history(env["conn"], env["vendor"]["id"])) == 2
     assert service.delete_saved_results(env["conn"], env["vendor"]) == 2
     assert service.score_history(env["conn"], env["vendor"]["id"]) == [] and service.latest_check(env["conn"], env["vendor"]["id"]) is None
-    app = env["conn"].execute("SELECT check_id, snapshot_json FROM applications WHERE id = ?", (sent["id"],)).fetchone()
+    app, = H.rows(env["conn"], "applications", id=sent["id"])
     assert app["check_id"] is None and json.loads(app["snapshot_json"])["score"] == s1["score"]   # the lender copy stays
-    assert env["conn"].execute("SELECT detail FROM audit_log WHERE action = 'delete_saved_results'").fetchone()[0] == "checks=2"
+    assert [r["detail"] for r in H.rows(env["conn"], "audit_log", action="delete_saved_results")] == ["checks=2"]
 
 
 # ---------------------------------------------------------------- privacy and files
@@ -170,7 +204,7 @@ def test_no_statement_content_in_the_database_or_audit_log(env, csv_bytes):
     assert not re.search(r"(?<![\d.])\d{9,}", text), "a phone-like digit run was stored"
     for word in ("Merchant Payment", "Customer Withdrawal", "CP_", "Receipt", "statement 0722"):
         assert word not in text
-    audit = " ".join(str(v) for r in env["conn"].execute("SELECT * FROM audit_log") for v in tuple(r))
+    audit = " ".join(str(v) for r in H.rows(env["conn"], "audit_log") for v in r.values())
     assert ".csv" not in audit and "statement" not in audit.lower()
 
 

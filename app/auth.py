@@ -2,16 +2,21 @@
 
 Passwords are hashed with hashlib.scrypt (n=2**14, r=8, p=1) and a random 16-byte salt per user, and compared with
 hmac.compare_digest. After 5 failed sign-ins in a row an account is locked for 10 minutes; a successful sign-in
-resets the counter. Unknown email and wrong password give the same message. `now` (seconds since the epoch) can be
-passed in so the tests control the clock.
+resets the counter. The failure counter and the lock are updated by ONE atomic UPDATE statement, so concurrent
+attempts cannot lose a count. Unknown email and wrong password give the same message. Emails are stored and compared
+lower-cased. `now` (seconds since the epoch) can be passed in so the tests control the clock.
 """
 import hashlib
 import hmac
 import re
 import secrets
-import time
+from datetime import timedelta
+
+from sqlalchemy import case, insert, literal, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app import db
+from app.db import users
 
 MIN_PASSWORD_LENGTH = 10
 MAX_FAILED_ATTEMPTS = 5
@@ -22,6 +27,7 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 SIGN_IN_FAILED = "Email or password is incorrect."
 ACCOUNT_LOCKED = "Too many attempts. Try again in 10 minutes."
+EMAIL_TAKEN = "An account with this email already exists."
 
 
 class AuthError(ValueError):
@@ -60,6 +66,15 @@ def normalise_email(email: str) -> str:
     return e
 
 
+def find_user_id(conn, email: str) -> int | None:
+    try:
+        e = normalise_email(email)
+    except AuthError:
+        return None
+    row = db.one(conn, select(users.c.id).where(users.c.email == e))
+    return row["id"] if row else None
+
+
 def create_user(conn, email, name, password, role, org_name=None, now=None) -> int:
     """Insert a user. Vendors come through service.register_vendor; lenders and admins only through scripts."""
     if role not in ROLES:
@@ -69,44 +84,58 @@ def create_user(conn, email, name, password, role, org_name=None, now=None) -> i
     if not name:
         raise AuthError("Enter your full name.")
     check_new_password(password)
-    if db.one(conn, "SELECT 1 FROM users WHERE email = ?", (email,)):
-        raise AuthError("An account with this email already exists.")
+    if find_user_id(conn, email) is not None:
+        raise AuthError(EMAIL_TAKEN)
     h, salt = hash_password(password)
-    return db.write(conn, "INSERT INTO users (email, name, org_name, role, password_hash, salt, created_at) "
-                          "VALUES (?, ?, ?, ?, ?, ?, ?)", (email, name, org_name, role, h, salt, db.utcnow_iso(now)))
+    try:
+        with db.transaction(conn):
+            res = conn.execute(insert(users).values(email=email, name=name, org_name=org_name, role=role,
+                                                    password_hash=h, salt=salt, created_at=db.utcnow(now)))
+    except IntegrityError:                     # two sign-ups with one email at the same moment
+        raise AuthError(EMAIL_TAKEN) from None
+    return int(res.inserted_primary_key[0])
+
+
+def _record_failure(conn, user_id: int, now) -> bool:
+    """Count one failed attempt and lock at the 5th, in one atomic UPDATE. Returns True if the account is now locked."""
+    nxt = users.c.failed_attempts + 1
+    until = literal(db.utcnow(now) + timedelta(seconds=LOCK_SECONDS), users.c.locked_until.type)
+    stmt = (update(users).where(users.c.id == user_id)
+            .values(failed_attempts=case((nxt >= MAX_FAILED_ATTEMPTS, 0), else_=nxt),
+                    locked_until=case((nxt >= MAX_FAILED_ATTEMPTS, until), else_=users.c.locked_until))
+            .returning(users.c.locked_until))
+    with db.transaction(conn):
+        locked_until = conn.execute(stmt).scalar_one()
+    return locked_until is not None and locked_until > db.utcnow(now)
 
 
 def authenticate(conn, email: str, password: str, now: float | None = None) -> dict:
     """Return the user as a dict, or raise AuthError (same message for unknown email and wrong password)."""
-    now = time.time() if now is None else now
     try:
         email = normalise_email(email)
     except AuthError:
         raise AuthError(SIGN_IN_FAILED) from None
-    row = db.one(conn, "SELECT * FROM users WHERE email = ?", (email,))
+    row = db.one(conn, select(users).where(users.c.email == email))
     if row is None or not row["is_active"]:
         verify_password(password or "", *_DUMMY)
         raise AuthError(SIGN_IN_FAILED)
-    if row["locked_until"] is not None and now < row["locked_until"]:
+    if row["locked_until"] is not None and db.utcnow(now) < row["locked_until"]:
         raise AuthError(ACCOUNT_LOCKED)
     if not verify_password(password or "", row["password_hash"], row["salt"]):
-        failures = row["failed_attempts"] + 1
-        if failures >= MAX_FAILED_ATTEMPTS:
-            db.write(conn, "UPDATE users SET failed_attempts = 0, locked_until = ? WHERE id = ?", (now + LOCK_SECONDS, row["id"]))
-            raise AuthError(ACCOUNT_LOCKED)
-        db.write(conn, "UPDATE users SET failed_attempts = ? WHERE id = ?", (failures, row["id"]))
-        raise AuthError(SIGN_IN_FAILED)
-    db.write(conn, "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?", (row["id"],))
+        raise AuthError(ACCOUNT_LOCKED if _record_failure(conn, row["id"], now) else SIGN_IN_FAILED)
+    with db.transaction(conn):
+        conn.execute(update(users).where(users.c.id == row["id"]).values(failed_attempts=0, locked_until=None))
     return get_user(conn, row["id"])
 
 
 def change_password(conn, user_id: int, current: str, new: str, confirm: str) -> None:
-    row = db.one(conn, "SELECT password_hash, salt FROM users WHERE id = ?", (user_id,))
+    row = db.one(conn, select(users.c.password_hash, users.c.salt).where(users.c.id == user_id))
     if row is None or not verify_password(current or "", row["password_hash"], row["salt"]):
         raise AuthError("The current password is incorrect.")
     check_new_password(new, confirm)
     h, salt = hash_password(new)
-    db.write(conn, "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (h, salt, user_id))
+    with db.transaction(conn):
+        conn.execute(update(users).where(users.c.id == user_id).values(password_hash=h, salt=salt))
 
 
 PUBLIC_COLUMNS = ("id", "email", "name", "org_name", "role", "is_active", "created_at", "share_with_lenders",
@@ -114,11 +143,21 @@ PUBLIC_COLUMNS = ("id", "email", "name", "org_name", "role", "is_active", "creat
 
 
 def get_user(conn, user_id) -> dict | None:
-    """The user without password fields, or None."""
+    """The user without password fields (created_at as an ISO string), or None."""
     if user_id is None:
         return None
-    row = db.one(conn, f"SELECT {', '.join(PUBLIC_COLUMNS)} FROM users WHERE id = ?", (int(user_id),))
-    return dict(row) if row else None
+    row = db.one(conn, select(*(users.c[c] for c in PUBLIC_COLUMNS)).where(users.c.id == int(user_id)))
+    if row is None:
+        return None
+    row["created_at"] = db.iso(row["created_at"])
+    for flag in ("is_active", "share_with_lenders", "save_results", "email_notifications"):
+        row[flag] = bool(row[flag])
+    return row
+
+
+def set_active(conn, user_id: int, active: bool) -> None:
+    with db.transaction(conn):
+        conn.execute(update(users).where(users.c.id == user_id).values(is_active=bool(active)))
 
 
 def has_role(user: dict | None, *roles: str) -> bool:

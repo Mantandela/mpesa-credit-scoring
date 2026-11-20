@@ -1,4 +1,4 @@
-"""Small building blocks shared by the pages: status text, icons, hero card, rows, navigation.
+"""Small building blocks shared by the pages: status text, icons, top bar, hero card, rows, navigation.
 
 Status is always shown as bold coloured TEXT (status_text / status_md). Never a tinted background, pill or badge.
 """
@@ -9,6 +9,7 @@ import streamlit as st
 
 from app import theme
 
+APP_NAME = "Alama"
 STATUS_COLORS = {
     # applications
     "pending": "#B45309", "approved": "#067647", "declined": "#B42318",
@@ -26,13 +27,6 @@ HERO_TIER_COLOR = "#FFD98A"
 # Streamlit markdown colour names; .streamlit/config.toml sets their text colours to exactly these hex values
 _MD_NAMES = {"#B45309": "orange", "#067647": "green", "#B42318": "red", "#6B6B85": "gray"}
 NAIROBI = timezone(timedelta(hours=3))
-
-ICONS = {
-    "logo": '<path d="M4 17l5-5 4 4 7-8" /><path d="M15 8h5v5" />',
-    "check": '<circle cx="12" cy="12" r="9" /><path d="M8 12.5l2.5 2.5L16 9.5" />',
-    "upload": '<path d="M12 16V4" /><path d="M7 9l5-5 5 5" /><path d="M5 20h14" />',
-    "chevron": '<path d="M9 6l6 6-6 6" />',
-}
 
 
 def status_color(label: str, on_hero: bool = False) -> str:
@@ -52,19 +46,18 @@ def status_md(label: str) -> str:
     return f":{_MD_NAMES[status_color(label)]}[**{label}**]"
 
 
-def icon(name: str, color: str = theme.PURPLE, size: int = 24, label: str | None = None) -> str:
+def icon(name: str, color: str = theme.PURPLE, size: int = 24, label: str | None = None, stroke: float = 2) -> str:
     """Inline SVG line icon. Decorative unless a label is given."""
     a11y = f'role="img" aria-label="{escape(label)}"' if label else 'aria-hidden="true"'
-    return (f'<svg {a11y} width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" '
-            f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{ICONS[name]}</svg>')
+    return theme.svg(name, color, size, stroke).replace("<svg ", f"<svg {a11y} ", 1)
 
 
-def html(s: str) -> None:
-    st.markdown(s, unsafe_allow_html=True)
+def html(s: str, **kw) -> None:
+    st.markdown(s, unsafe_allow_html=True, **kw)
 
 
 def title(text: str, sub: str | None = None) -> None:
-    html(f'<div class="title">{escape(text)}</div>' + (f'<div class="subtitle">{escape(sub)}</div>' if sub else ""))
+    html(f'<div class="title">{escape(text)}</div>' + (f'<div class="caption">{escape(sub)}</div>' if sub else ""))
 
 
 def section(text: str) -> None:
@@ -80,8 +73,12 @@ def alert(text: str) -> None:
     html(f'<div class="alert-text" role="alert">{escape(text)}</div>')
 
 
-def row(key: str, value_html: str) -> str:
-    return f'<div class="row"><span class="k">{escape(key)}</span><span class="v">{value_html}</span></div>'
+def row(key: str, value_html: str, lead_html: str = "") -> str:
+    return f'<div class="row"><span class="k">{lead_html}{escape(key)}</span><span class="v">{value_html}</span></div>'
+
+
+def reason_row(direction: str, phrase: str) -> str:
+    return f'<div class="reason"><span class="dir">{status_text(direction)}</span><span class="txt">{escape(phrase)}</span></div>'
 
 
 def money(x) -> str:
@@ -101,16 +98,9 @@ def greeting(now: datetime | None = None) -> str:
     return "Good morning" if h < 12 else "Good afternoon" if h < 17 else "Good evening"
 
 
-def hero(score: int, tier: str, line: str | None = None) -> None:
-    extra = f'<div class="line">{escape(line)}</div>' if line else ""
-    html(f'<div class="hero" role="group" aria-label="Your credit score">'
-         f'<div class="score">{int(score)} <span>/ 850</span></div>'
-         f'<div class="tier">{status_text(tier, on_hero=True)}</div>{extra}</div>')
-
-
-def auth_header(heading: str, sub: str) -> None:
-    html(f'<div class="auth-head"><span class="logo">{icon("logo", theme.PURPLE, 26)}</span>'
-         f'<div class="welcome">{escape(heading)}</div><div class="sub">{escape(sub)}</div></div>')
+def initials(name: str) -> str:
+    parts = [p for p in (name or "").split() if p]
+    return "".join(p[0] for p in parts[:2]).upper() or "?"
 
 
 def go(page: str, **state) -> None:
@@ -126,15 +116,53 @@ def sign_out() -> None:
     st.session_state["page"] = "signin"
 
 
-NAV_TABS = (("home", "Home", ":material/home:"), ("score", "Score", ":material/speed:"),
-            ("history", "History", ":material/receipt_long:"), ("profile", "Profile", ":material/person:"))
+# ------------------------------------------------------------------ larger blocks
+def _icon_box(name: str, label: str) -> str:
+    return f'<div class="icon-box">{icon(name, theme.INK, 22, label)}</div>'
+
+
+def top_bar(user: dict, title_text: str | None = None, caption: str | None = None, home: bool = False) -> None:
+    """Menu icon, title block, bell icon and the avatar (initials; opens Profile). Menu and bell have no action yet."""
+    with st.container(horizontal=True, key="topbar", vertical_alignment="center", gap="small"):
+        html(_icon_box("menu", "Menu"), width="content")
+        if home:
+            first = (user.get("name") or "").split()[0] if user.get("name") else ""
+            block = f'<div class="tb-greet">{greeting()}</div><div class="tb-name">{escape(first)}</div>'
+        elif title_text:
+            block = f'<div class="tb-title">{escape(title_text)}</div>' + (
+                f'<div class="tb-caption">{escape(caption)}</div>' if caption else "")
+        else:
+            block = ""
+        html(f"<div>{block}</div>", width="stretch")
+        html(_icon_box("bell", "Notifications"), width="content")
+        st.button(initials(user.get("name", "")), key="topbar_avatar", on_click=go, args=("profile",), width="content")
+
+
+def hero(score=None, tier: str | None = None, line: str | None = None, cta: bool = False) -> None:
+    """Gradient score card. Without a score it shows "--" and, with cta=True, a "Check your score" button."""
+    with st.container(key="hero"):
+        if score is None:
+            html('<div class="hero-label">Your credit score</div><div class="hero-score">--</div>')
+            if cta:
+                st.button("Check your score", key="cta_score", on_click=go, args=("score",), width="stretch")
+            return
+        extra = f'<div class="hero-line">{escape(line)}</div>' if line else ""
+        html(f'<div role="group" aria-label="Your credit score"><div class="hero-label">Your credit score</div>'
+             f'<div class="hero-score">{int(score)} <span>/ 850</span></div>'
+             f'<div class="hero-tier">{status_text(tier, on_hero=True)}</div>{extra}</div>')
+
+
+def auth_header(heading: str, sub: str) -> None:
+    html(f'<div class="auth-head"><div class="auth-brand"><span class="logo">{icon("logo", theme.PURPLE, 24)}</span>'
+         f'{APP_NAME}</div><div class="auth-title">{escape(heading)}</div><div class="auth-sub">{escape(sub)}</div></div>')
+
+
+NAV_TABS = (("home", "Home"), ("score", "Score"), ("history", "History"), ("profile", "Profile"))
 
 
 def bottom_nav(active: str) -> None:
-    """Vendor tab bar, fixed to the bottom of the column (CSS in theme.py)."""
+    """Vendor tab bar, fixed to the bottom of the frame (CSS in theme.py; icons are SVG data URIs there)."""
     html(theme.active_tab_css(active))
-    with st.container(key="bottom_nav"):
-        cols = st.columns(len(NAV_TABS))
-        for col, (page, label, ico) in zip(cols, NAV_TABS):
-            with col:
-                st.button(label, key=f"nav_{page}", icon=ico, on_click=go, args=(page,), width="stretch")
+    with st.container(horizontal=True, key="bottom_nav"):
+        for page, label in NAV_TABS:
+            st.button(label, key=f"nav_{page}", on_click=go, args=(page,), width="stretch")

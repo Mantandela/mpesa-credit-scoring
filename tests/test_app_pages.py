@@ -26,13 +26,18 @@ def models(tmp_path_factory):
 def env(models, tmp_path, monkeypatch):
     monkeypatch.setenv("APP_MODEL_PATH", str(models["model"]))
     monkeypatch.setenv("APP_REFERENCE_PATH", str(models["ref"]))
+    monkeypatch.delenv("DATABASE_URL", raising=False)           # the screens are tested on SQLite only
     monkeypatch.setenv("APP_DB_PATH", str(tmp_path / "app.db"))
-    conn = db.connect()
+    url = db.database_url()
+    conn = db.connect()                                          # the same cached engine the app uses for this URL
     vendor = service.register_vendor(conn, "Wanjiku Test", "vendor@example.com", PW, PW)
     lender = auth.get_user(conn, auth.create_user(conn, "umoja@example.com", "Umoja desk", PW, "lender", org_name="Umoja SACCO"))
     auth.create_user(conn, "tumaini@example.com", "Tumaini desk", PW, "lender", org_name="Tumaini Microfinance")
     yield {"conn": conn, "vendor": vendor, "lender": lender}
     conn.close()
+    engine = db._ENGINES.pop(url, None)
+    if engine is not None:
+        engine.dispose()
 
 
 def _app(**state) -> AppTest:
@@ -75,7 +80,13 @@ def test_vendor_signs_in_and_reaches_home(env):
     _no_errors(at)
     assert at.session_state["page"] == "home" and at.session_state["user_id"] == env["vendor"]["id"]
     text = _text(at)
-    assert re.search(r"Good (morning|afternoon|evening), Wanjiku", text)
+    # top bar: small greeting above the first name, avatar initials that open Profile
+    assert re.search(r'<div class="tb-greet">Good (morning|afternoon|evening)</div><div class="tb-name">Wanjiku</div>', text)
+    assert at.button(key="topbar_avatar").label == "WT"
+    # Home always shows the hero ("--" without a score), the quick actions and the latest application
+    assert '<div class="hero-score">--</div>' in text and "No applications yet" in text
+    assert [at.button(key=k).label for k in ("qa_score", "qa_loan", "qa_history", "qa_more")] == \
+        ["Check score", "Loan check", "History", "More"]
     assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Score", "History", "Profile"]
     assert at.button(key="cta_score").label == "Check your score"                 # no score yet: one call to action
 
@@ -166,7 +177,7 @@ def test_vendor_journey(env):
     sent = at.session_state["sent"]
     text = _text(at)
     assert "Application sent" in text and "Umoja SACCO" in text and sent["ref"] in text and "Pending" in text
-    snap = env["conn"].execute("SELECT snapshot_json FROM applications WHERE ref = ?", (sent["ref"],)).fetchone()[0]
+    snap = H.rows(env["conn"], "applications", ref=sent["ref"])[0]["snapshot_json"]
     assert '"amount": 150000.0' in snap                                            # the slider amount is the request
 
     # History: one line per application
@@ -200,7 +211,7 @@ def test_status_text_is_coloured_text_only():
         assert "background" not in md and md.startswith(":") and "**" in md
     assert "#FFD98A" in components.status_text("Moderate risk", on_hero=True)
     assert components.status_color("Pending") == "#B45309" and components.status_color("High risk") == "#C2410C"
-    assert ".status" not in theme.CSS                                               # no CSS restyles status text
+    assert ".status" not in theme.css()                                             # no CSS restyles status text
 
 
 def test_no_emoji_anywhere(env, models):

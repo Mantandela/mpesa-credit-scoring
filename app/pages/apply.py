@@ -6,21 +6,22 @@ from app.pages import current_result
 
 
 def render(conn, user) -> None:
-    ui.title("Apply to a lender")
+    ui.top_bar(user, "Apply", "Choose a lender")
     result = current_result(conn, user)
     if result is None:
-        st.button("Check your score", type="primary", key="apply_cta", on_click=ui.go, args=("score",), width="stretch")
+        ui.hero(cta=True)
         return
     lenders = service.list_lenders(conn)
     if not lenders:
-        ui.muted("No lenders available yet.")
+        with st.container(key="card_no_lenders"):
+            ui.muted("No lenders available yet.")
         return
     amount = float(st.session_state.get("apply_amount", result["request_amount"]))
     term = float(result["request_term"])
 
     with st.container(key="card_lenders"):
         names = {l["id"]: l["org_name"] for l in lenders}
-        lender_id = st.radio("Choose a lender", list(names), format_func=names.get, key="apply_lender")
+        lender_id = st.radio("Lender", list(names), format_func=names.get, key="apply_lender")
     with st.container(key="card_summary"):
         ui.section("Summary")
         ui.html(ui.row("Score", f"{result['score']} / 850")

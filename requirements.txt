@@ -13,4 +13,6 @@ pypdf
 reportlab
 cryptography
 streamlit>=1.50
+sqlalchemy==2.1.9
+psycopg[binary]==3.3.9
 pytest

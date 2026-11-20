@@ -3,7 +3,7 @@ from html import escape
 
 import streamlit as st
 
-from app import components as ui, service
+from app import components as ui, service, theme
 
 
 def _md_escape(s: str) -> str:
@@ -11,11 +11,14 @@ def _md_escape(s: str) -> str:
 
 
 def render(conn, user) -> None:
-    ui.title("My applications")
+    ui.top_bar(user, "Applications", "Sent to lenders")
     apps = service.list_applications(conn, user["id"])
     if not apps:
-        ui.muted("No applications yet.")
-        st.button("Check your score", type="primary", key="history_cta", on_click=ui.go, args=("score",), width="stretch")
+        with st.container(key="card_empty"):
+            ui.html(f'<div class="center"><div class="icon-circle lg">{ui.icon("inbox", theme.PURPLE, 28)}</div>'
+                    '<div class="section" style="margin-top:12px">No applications yet</div>'
+                    '<div class="caption" style="margin-top:4px">Check your score, then apply to a lender.</div></div>')
+            st.button("Check your score", key="history_cta", on_click=ui.go, args=("score",), width="stretch")
         return
     for a in apps:
         status = a["status"].capitalize()
