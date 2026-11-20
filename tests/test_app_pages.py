@@ -83,12 +83,65 @@ def test_vendor_signs_in_and_reaches_home(env):
     # top bar: small greeting above the first name, avatar initials that open Profile
     assert re.search(r'<div class="tb-greet">Good (morning|afternoon|evening)</div><div class="tb-name">Wanjiku</div>', text)
     assert at.button(key="topbar_avatar").label == "WT"
-    # Home always shows the hero ("--" without a score), the quick actions and the latest application
+    # Home without a score: the hero with "--" and its button, no Business health card, no applications yet
     assert '<div class="hero-score">--</div>' in text and "No applications yet" in text
-    assert [at.button(key=k).label for k in ("qa_score", "qa_loan", "qa_history", "qa_more")] == \
-        ["Check score", "Loan check", "History", "More"]
+    assert at.button(key="cta_score").label == "Check your score"
+    assert "Business health" not in text
+    assert not [b for b in at.button if b.key.startswith(("qa_", "row_breakdown"))]   # no tiles, no breakdown row
     assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Score", "History", "Profile"]
-    assert at.button(key="cta_score").label == "Check your score"                 # no score yet: one call to action
+
+
+def test_home_with_a_score_and_applications(env):
+    user, conn = env["vendor"], env["conn"]
+    result = service.run_score_check(conn, user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
+    sent = [service.create_application(conn, user, env["lender"]["id"], result, consent=True) for _ in range(4)]
+    at = _app(user_id=user["id"], page="home")                  # no session result: the latest saved check is used
+    _no_errors(at)
+    text = _text(at)
+    assert f'<div class="hero-score">{result["score"]} <span>/ 850</span></div>' in text
+    assert "Business health" in text
+    for p in result["pillars"]:                                  # one row per area: name left, rating as coloured text
+        assert components.row(p["name"], components.status_text(p["label"])) in text
+    rows = [b for b in at.button if b.key.startswith("row_app_")]
+    assert len(rows) == 3                                        # up to 3, newest first
+    assert [b.key for b in rows] == [f"row_app_{s['id']}" for s in reversed(sent)][:3]
+    assert all(b.label == "Umoja SACCO  :orange[**Pending**]" for b in rows)
+    assert not [b for b in at.button if b.key.startswith(("qa_", "row_breakdown"))]
+    rows[0].click().run()
+    assert at.session_state["page"] == "history"                 # a row opens History
+
+
+def test_home_uses_the_session_result_when_checks_are_not_saved(env):
+    user = service.update_profile_flags(env["conn"], env["vendor"]["id"], save_results=False)
+    result = service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(), "s.csv"), 5000, 14)
+    assert result["check_id"] is None
+    at = _app(user_id=user["id"], page="home", result=result)
+    _no_errors(at)
+    assert "Business health" in _text(at) and f"{result['score']} <span>/ 850</span>" in _text(at)
+
+
+MENU = ["Home", "Check score", "Apply for a loan", "My applications", "Profile", "Sign out"]
+
+
+def test_menu_opens_lists_six_items_and_navigates(env):
+    at = _app(user_id=env["vendor"]["id"], page="history")
+    menu = at.button(key="topbar_menu")
+    assert menu.label == "Menu"                                  # its accessible name (the text is hidden visually)
+    assert not [b for b in at.button if b.key.startswith("menu_")]                     # closed at first
+    menu.click().run()
+    _no_errors(at)
+    assert [b.label for b in at.button if b.key.startswith("menu_")] == MENU
+    for key, page in (("menu_score", "score"), ("menu_apply", "apply"), ("menu_history", "history"),
+                      ("menu_profile", "profile"), ("menu_home", "home")):
+        at.button(key="topbar_menu").click().run()
+        at.button(key=key).click().run()
+        _no_errors(at)
+        assert at.session_state["page"] == page, key
+        assert not [b for b in at.button if b.key.startswith("menu_")]                 # the menu closed
+    at.button(key="topbar_menu").click().run()
+    at.button(key="menu_signout").click().run()
+    assert at.session_state["page"] == "signin" and "user_id" not in at.session_state
+    assert "Welcome back" in _text(at)
 
 
 def test_wrong_password_shows_one_generic_message(env):
@@ -144,7 +197,7 @@ def test_vendor_journey(env):
     at.run()
     _no_errors(at)
     text = _text(at)
-    assert "Prototype, trained on simulated data" in text
+    assert "simulated data" not in text and "Prototype" not in text               # no prototype line on Result
     assert f"{result['score']} <span>/ 850</span>" in text and "Chance of default" in text
     assert all(p["name"] in text for p in result["pillars"])
     assert "Score over time" in text                                               # two saved checks

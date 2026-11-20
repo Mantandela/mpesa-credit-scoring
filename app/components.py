@@ -121,10 +121,44 @@ def _icon_box(name: str, label: str) -> str:
     return f'<div class="icon-box">{icon(name, theme.INK, 22, label)}</div>'
 
 
+MENU_ITEMS = (  # key, label, page (None = sign out); icons are in theme.MENU_ICONS
+    ("home", "Home", "home"),
+    ("score", "Check score", "score"),
+    ("apply", "Apply for a loan", "apply"),
+    ("history", "My applications", "history"),
+    ("profile", "Profile", "profile"),
+    ("signout", "Sign out", None),
+)
+
+
+MENU_FLAG = "menu_navigated"
+
+
+def _menu_choose(page) -> None:
+    """Menu item callback. Callbacks always fire, also when the dialog is not drawn again on the next run."""
+    if page is None:
+        sign_out()
+    else:
+        go(page)
+    st.session_state[MENU_FLAG] = True
+
+
+@st.dialog("Menu", width="small")
+def menu_dialog() -> None:
+    """The app menu. A click inside a dialog reruns only the dialog, so after a choice it asks for a full rerun,
+    which draws the new page and closes the dialog (main.py clears the flag on every full run)."""
+    if st.session_state.pop(MENU_FLAG, False):
+        st.rerun()
+    for key, label, page in MENU_ITEMS:
+        st.button(label, key=f"menu_{key}", on_click=_menu_choose, args=(page,), width="stretch")
+
+
 def top_bar(user: dict, title_text: str | None = None, caption: str | None = None, home: bool = False) -> None:
-    """Menu icon, title block, bell icon and the avatar (initials; opens Profile). Menu and bell have no action yet."""
+    """Menu button (opens the menu dialog), title block, bell icon (visual only) and the avatar (opens Profile)."""
     with st.container(horizontal=True, key="topbar", vertical_alignment="center", gap="small"):
-        html(_icon_box("menu", "Menu"), width="content")
+        # a real button: its visible label is hidden by CSS but stays its accessible name, "Menu"
+        if st.button("Menu", key="topbar_menu", width="content"):
+            menu_dialog()
         if home:
             first = (user.get("name") or "").split()[0] if user.get("name") else ""
             block = f'<div class="tb-greet">{greeting()}</div><div class="tb-name">{escape(first)}</div>'

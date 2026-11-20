@@ -52,6 +52,7 @@ def _engine(url: str):
 
 
 def run() -> None:
+    st.session_state.pop(ui.MENU_FLAG, None)          # a full run: any menu choice has already been applied
     theme.inject()
     _warm_up_once()
     try:

@@ -6,8 +6,8 @@ st.html (a style-only st.html takes no space in the layout).
 Layout: on screens wider than 600px the app is a centred 430px phone frame on a soft gradient, scrolling inside the
 frame, with the tab bar fixed to the frame's bottom edge. At 600px and below the frame fills the screen.
 
-Containers are styled through their keys: "card_*" white card, "hero" gradient card, "qa_*" quick-action tile,
-"row_*" list row with a chevron, "topbar" the top bar, "bottom_nav" the tab bar.
+Containers are styled through their keys: "card_*" white card, "hero" gradient card, "row_*" list row with a chevron,
+"topbar" the top bar ("topbar_menu" its menu button), "menu_*" the items of the menu dialog, "bottom_nav" the tab bar.
 
 Icons are simple inline SVG line icons. Buttons cannot hold SVG markup, so their icons are the same SVGs as CSS data
 URIs (see icon_uri); everywhere else they are inline <svg> elements (components.icon).
@@ -44,6 +44,7 @@ ICONS = {
     "inbox": '<path d="M4 13l2.5-7h11L20 13v6H4z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>',
     "shield": '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/>',
     "chart": '<path d="M4 19h16"/><path d="M6 15l4-4 3 3 5-6"/>',
+    "logout": '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h10"/>',
 }
 
 
@@ -57,22 +58,16 @@ def icon_uri(name: str, color: str, stroke: float = 2) -> str:
     return f'url("data:image/svg+xml;utf8,{quote(svg(name, color, stroke=stroke))}")'
 
 
-# quick-action tiles: key -> (icon, tile tint, icon colour). Tints are for icon tiles only, never for status.
-TILES = {
-    "qa_score": ("gauge", "#E8DFFB", "#4A2FB0"),
-    "qa_loan": ("wallet", "#FCE3EE", "#A3174F"),
-    "qa_history": ("clock", "#FDE8D6", "#9A3412"),
-    "qa_more": ("grid", "#DDEBFB", "#1D4E89"),
-}
 NAV_ICONS = {"home": "home", "score": "gauge", "history": "receipt", "profile": "user"}
+MENU_ICONS = {"home": "home", "score": "gauge", "apply": "wallet", "history": "receipt", "profile": "user", "signout": "logout"}
 
 
-def _tile_css() -> str:
-    out = []
-    for key, (ico, tint, color) in TILES.items():
-        out.append(f".st-key-{key} button::before {{ background: {tint} {icon_uri(ico, color)} center / 26px no-repeat; }}")
+def _icon_css() -> str:
+    out = [f".st-key-topbar_menu button::before {{ background: {icon_uri('menu', INK)} center / 22px no-repeat; }}"]
     for page, ico in NAV_ICONS.items():
         out.append(f".st-key-nav_{page} button::before {{ background: {icon_uri(ico, MUTED)} center / 24px no-repeat; }}")
+    for key, ico in MENU_ICONS.items():
+        out.append(f".st-key-menu_{key} button::before {{ background: #E8DFFB {icon_uri(ico, PURPLE_DARK)} center / 20px no-repeat; }}")
     return "\n".join(out)
 
 
@@ -186,19 +181,43 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 [class*="st-key-row_"] button > div, [class*="st-key-row_"] button [data-testid="stMarkdownContainer"] {
   flex: 1 1 auto; text-align: left !important; justify-content: flex-start !important; }
 [class*="st-key-row_"] button p { text-align: left !important; }
-[class*="st-key-card_"]:has([class*="st-key-row_"]) { padding-top: 8px; padding-bottom: 8px; }
 [class*="st-key-row_"] button p { color: #1D1B3A !important; font-size: 15px !important; font-weight: 500 !important; }
 [class*="st-key-row_"] button::after { content: ""; flex: 0 0 20px; height: 20px; background: CHEVRON center / 20px no-repeat; }
 
-/* quick-action tiles: 56px tinted icon tile with a 12px label under it */
-.st-key-quick_actions { flex-wrap: nowrap !important; justify-content: space-between; gap: 6px !important; }
-[class*="st-key-qa_"] { flex: 1 1 0 !important; min-width: 0 !important; }
-[class*="st-key-qa_"] button { background: transparent !important; border: none !important; box-shadow: none !important;
-  flex-direction: column !important; gap: 8px !important; height: auto !important; min-height: 0 !important;
-  padding: 0 !important; width: 100%; }
-[class*="st-key-qa_"] button::before { content: ""; width: 56px; height: 56px; border-radius: 18px; display: block; }
-[class*="st-key-qa_"] button p { font-size: 12px !important; font-weight: 500 !important; color: #1D1B3A !important;
-  white-space: nowrap; }
+/* rows of one card share dividers (Latest applications) */
+[class*="st-key-card_"] [class*="st-key-row_"] button { border-radius: 0 !important;
+  border-bottom: 1px solid #EFEAFA !important; padding: 10px 0 !important; }
+[class*="st-key-card_"] [data-testid="stElementContainer"]:last-child [class*="st-key-row_"] button,
+[class*="st-key-card_"] [class*="st-key-row_"]:last-child button { border-bottom: none !important; }
+
+/* menu button in the top bar: a white 44px icon box; the label "Menu" is hidden visually but stays its accessible name */
+.st-key-topbar_menu { align-self: center !important; }
+.st-key-topbar_menu button { width: 44px !important; height: 44px; min-height: 44px !important; padding: 0 !important;
+  border-radius: 14px !important; background: #FFFFFF !important; border: none !important;
+  box-shadow: 0 4px 12px rgba(91,63,196,0.08) !important; }
+.st-key-topbar_menu button::before { content: ""; width: 22px; height: 22px; display: block; }
+.st-key-topbar_menu button:focus-visible, .st-key-topbar_avatar button:focus-visible, [class*="st-key-menu_"] button:focus-visible {
+  outline: 2px solid #5B3FC4 !important; outline-offset: 2px; }
+.st-key-topbar_menu button > div, .st-key-topbar_menu button p { position: absolute !important; width: 1px !important;
+  height: 1px !important; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; margin: -1px; padding: 0; }
+
+/* the menu dialog: a card the width of the frame (Streamlit wraps role=dialog in a wider panel: size that one) */
+[data-testid="stDialog"] div:has(> [role="dialog"]) { width: min(430px, calc(100vw - 32px)) !important;
+  max-width: 430px !important; background: transparent !important; box-shadow: none !important; border: none !important; }
+[data-testid="stDialog"] [role="dialog"] { width: 100% !important; max-width: 100% !important;
+  border-radius: 24px !important; background: #FFFFFF; font-family: 'Roboto', sans-serif;
+  box-shadow: 0 20px 60px rgba(74,47,176,0.25) !important; }
+[class*="st-key-menu_"] button > div { flex: 1 1 auto; text-align: left !important; justify-content: flex-start !important; }
+[class*="st-key-menu_"] button p { text-align: left !important; }
+[data-testid="stDialog"] [role="dialog"] h2, [data-testid="stDialog"] [role="dialog"] h2 * { font-size: 20px !important;
+  font-weight: 700 !important; color: #1D1B3A; }
+[class*="st-key-menu_"] button { background: transparent !important; border: none !important; box-shadow: none !important;
+  justify-content: flex-start !important; gap: 14px !important; height: 52px !important; min-height: 52px !important;
+  padding: 0 4px !important; border-radius: 14px !important; }
+[class*="st-key-menu_"] button:hover { background: #F5F2FC !important; }
+[class*="st-key-menu_"] button::before { content: ""; width: 38px; height: 38px; border-radius: 12px; display: block; flex: 0 0 38px; }
+[class*="st-key-menu_"] button p { color: #1D1B3A !important; font-size: 15px !important; font-weight: 500 !important; }
+.st-key-menu_signout button p { color: #B42318 !important; }
 
 /* ---------- bottom tab bar, fixed to the bottom of the frame ---------- */
 .st-key-bottom_nav { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); width: 430px; max-width: 100%;
@@ -275,7 +294,7 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 
 
 def css() -> str:
-    return CSS.replace("</style>", _tile_css() + "\n</style>")
+    return CSS.replace("</style>", _icon_css() + "\n</style>")
 
 
 def inject() -> None:

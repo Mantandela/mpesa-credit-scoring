@@ -6,9 +6,6 @@ import streamlit as st
 from app import components as ui, service, theme
 from app.pages import current_result
 
-PROTOTYPE_NOTE = "Prototype, trained on simulated data"
-
-
 def _chart(history) -> alt.Chart:
     df = pd.DataFrame(history, columns=["Date", "Score"])
     df["Date"] = pd.to_datetime(df["Date"])
@@ -26,7 +23,7 @@ def _chart(history) -> alt.Chart:
 
 def render(conn, user) -> None:
     result = current_result(conn, user)
-    ui.top_bar(user, "Your result", PROTOTYPE_NOTE if result else None)
+    ui.top_bar(user, "Your result")
     if result is None:
         ui.hero(cta=True)
         return
