@@ -2,7 +2,7 @@
 
 Project: AI-Based Credit Scoring System for Informal Sector Vendors Using Mobile Money Transaction Data (Case: M-Pesa)
 
-Status: v0.6 (draft; the loan-outcome sections follow v0.6, the persona table is still v0.2). Changes from v0.1: small mobile loan product, new default definition (about 16.6%), `latent_risk` ranges rescaled, till/send-money mix for all personas, smaller Fuliza amounts. **Most numbers below are still starting values, not sourced figures.** Record the source or "Author's assumption" for each in `assumptions.md` before generating the final dataset.
+Status: v0.6 (draft; the loan-outcome sections follow v0.6, the persona table is still v0.2). Changes from v0.1: small mobile loan product, new default definition (about 16.6%), `latent_risk` ranges rescaled, till/send-money mix for all personas, smaller Fuliza amounts. Generator v0.7 (table unchanged): supplier payments, bills and small Fuliza-funded restocks now follow the "Supplier payments" and "Bill payments" rows; `python src/persona_check.py` checks every such cell on the full data and `tests/test_personas.py` on a fresh sample (`docs/assumptions.md` row 8 and section 2). **Most numbers below are still starting values, not sourced figures.** Record the source or "Author's assumption" for each in `assumptions.md` before generating the final dataset.
 
 ## How personas are used
 

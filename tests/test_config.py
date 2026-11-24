@@ -32,9 +32,12 @@ def test_every_scorecard_feature_is_a_column_the_feature_stage_produces():
     assert not missing, f"scorecard uses features that features.py does not create: {sorted(missing)}"
 
 
-def test_cash_deposit_share_is_a_model_input_only_not_a_scorecard_input():
-    # Decision: its direction is ambiguous, so the scorecard does not use it (docs/scorecard_mapping.md)
-    assert "cash_deposit_share_90" not in {f for feats in C.SCORECARD_PILLARS.values() for f in feats}
+@pytest.mark.parametrize("feature", ["cash_deposit_share_90", "withdraw_share_of_income_90"])
+def test_features_with_an_unsupported_direction_are_model_inputs_only_not_scorecard_inputs(feature):
+    # Decision: their risk direction is not supported, so the scorecard does not use them (docs/scorecard_mapping.md)
+    assert feature not in {f for feats in C.SCORECARD_PILLARS.values() for f in feats}
+    tx = clean.clean(toy.make_vendor(days=120), as_of="2026-12-31")
+    assert feature in Fe.build(tx, toy.make_apps(dates=("2026-03-15",))).columns   # still built, so still a model input
 
 
 def test_scorecard_coefficients_are_positive():

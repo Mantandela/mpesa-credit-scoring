@@ -9,7 +9,7 @@ Rule (all amounts KES, rounded DOWN to the nearest 100):
                          "unknown" (no amounts) when monthly income is missing or <= 0
 
 cutoffs are the affordability band cutoffs in models/reference.json (amount_to_avg_monthly_income_90 at the 50th
-percentile = comfortable, 85th = stretched; about 0.056 and 0.419 for the trained model). They are always read from
+percentile = comfortable, 85th = stretched; about 0.058 and 0.411 for the trained model). They are always read from
 the reference file, never written here.
 
 Caveats: the tier factors are placeholders chosen for the prototype; monthly income is the statement's customer

@@ -12,8 +12,10 @@ PERSONA_OVERLAP = 0.10           # share of parameters a vendor takes from an ad
 # till_share: share of inflows that are till payments (rest is send money).
 # fuliza_prop: chance that a payment the balance cannot cover is funded by Fuliza (assumption).
 # sweep_prob: chance per active day that the vendor withdraws cash at an agent (assumption).
-# supplier_prob: chance per week of a supplier (buy goods) payment (assumption).
-# bill_miss: chance a monthly bill is not paid on time (assumption).
+# supplier_prob: chance per week of a supplier (buy goods) payment, times the vendor's sales level (assumption).
+# bill_miss: chance a monthly bill is not paid on time; a seasonal vendor's chance of paying on time also falls in
+#   off-peak months (assumption). Planned supplier payments and on-time bills are topped up by a cash deposit if the
+#   wallet is short, so these two parameters, not the wallet balance, set how regular the payments are.
 PERSONAS = {
     "stable": dict(
         share=0.30, months=(12, 24), tx_per_day=(20, 40), ticket=(100, 200), active_days=(24, 28),
@@ -70,10 +72,12 @@ PERSONAL_SEND_PER_MONTH = (1, 4)       # send-money-out events per month (assump
 PERSONAL_SEND_AMOUNT = (100, 1500)
 AIRTIME_PER_MONTH = (2, 8)
 AIRTIME_AMOUNT = (20, 200)
-SMALL_RESTOCK_PER_WEEK = 2.5           # small mid-week restock payments, scaled by fuliza_prop (assumption)
+SMALL_RESTOCK_PER_WEEK = 2.5           # small mid-week restocks per week, scaled by supplier_prob x fuliza_prop x sales level (assumption)
 SMALL_RESTOCK_AMOUNT = (100, 800)
-SUPPLIER_SHARE_OF_WEEK = (0.25, 0.45)  # supplier payment as share of last 7 days' inflow (assumption)
-BILL_SHARE_OF_MONTH = (0.06, 0.12)     # monthly bill as share of last 30 days' inflow (assumption)
+SMALL_RESTOCK_HOURS = (5, 8)           # restocks are bought at dawn, 05:00 to 07:59, before most sales (assumption)
+SUPPLIER_SHARE_OF_WEEK = (0.25, 0.45)  # supplier payment as share of the inflow since the last supplier day (assumption)
+BILL_SHARE_OF_MONTH = (0.06, 0.12)     # monthly bill as share of the inflow since the last bill day (assumption)
+LATE_BILL_PROB = 0.5                   # chance a bill not planned on time is paid 5 to 12 days late (assumption)
 DEPOSIT_PROB_PER_DAY = 0.02            # cash deposited at an agent (assumption)
 DEPOSIT_AMOUNT = (500, 5000)
 SWEEP_FRACTION = (0.7, 1.0)            # share of balance withdrawn when a vendor sweeps (assumption)
@@ -119,8 +123,9 @@ SCORECARD_PILLARS = {
     "B_cash_flow_buffer": {
         "near_zero_day_share_90": +1, "balance_median_eod_90": -1, "balance_min_eod_90": -1,
         "net_cash_flow_ratio_90": -1, "balance_trend_90": -1, "balance_cv_90": +1,
-        "withdraw_share_of_income_90": +1, "fee_share_of_income_90": +1},
-    # cash_deposit_share_90 is left out: its risk direction is ambiguous. It stays a model input.
+        "fee_share_of_income_90": +1},
+    # cash_deposit_share_90 and withdraw_share_of_income_90 are left out: their risk direction is not supported by
+    # lending logic (docs/scorecard_mapping.md). Both stay model inputs.
     "C_borrowing_distress": {
         "fuliza_draws_90": +1, "fuliza_funded_share_90": +1, "fuliza_repay_lag_median_days_90": +1,
         "days_since_last_fuliza_draw": -1, "failed_payment_share_90": +1, "fuliza_amount_90": +1,

@@ -150,7 +150,34 @@ def report(df: pd.DataFrame, feats: list, weights_name: str, ceil: dict, shock_c
           "A disagreement means the feature's raw link to default is opposite to its assumed direction, usually because of persona "
           "structure in the simulated statements. It is a limitation to report, not something to fix by changing the direction.", ""]
     L += [f"- {x}" for x in dis] or ["- none"]
+    L += ["", "## Limitations", "",
+          "Features left out of the scorecard because lending logic does not support a direction (they remain model inputs; "
+          "docs/scorecard_mapping.md): " + ", ".join(f"{f} (raw AUC {roc_auc_score(df.defaulted, df[f].fillna(df[f].median())):.3f})"
+                                                     for f in LEFT_OUT if f in df) + ".", "",
+          "Remaining features whose raw association disagrees with their preset direction (kept; directions are never tuned):", ""]
+    for x in dis:
+        f = x.split(" (")[0]
+        if f not in NO_SIGNAL_BY_DESIGN:
+            L.append(f"- {x}: a limitation of the simulated statements, reported as is")
+    if not [x for x in dis if x.split(" (")[0] not in NO_SIGNAL_BY_DESIGN]:
+        L.append("- none")
+    L += ["", "Features expected to carry little or no signal in the simulation (where the raw AUC is near 0.5, the side "
+          "of 0.5 it falls on is noise; listed whether or not they agree with the direction in this run):", ""]
+    for f, why in NO_SIGNAL_BY_DESIGN.items():
+        r = roc_auc_score(df.defaulted, df[f].fillna(df[f].median()))
+        d = next(m[f] for m in C.SCORECARD_PILLARS.values() if f in m)
+        L.append(f"- {f} (set to {'+' if d > 0 else '-'}1, raw AUC {r:.3f}, "
+                 f"{'disagrees' if (r - 0.5) * d <= 0 else 'agrees'} in this run): {why}")
     return "\n".join(L) + "\n"
+
+
+LEFT_OUT = ("cash_deposit_share_90", "withdraw_share_of_income_90")
+NO_SIGNAL_BY_DESIGN = {
+    "requested_term_days": "no signal by design: the term is drawn at random, never from risk",
+    "failed_payment_share_90": "most failures are the random 1% added to test the cleaning step, but a payment that a "
+                               "short wallet cannot cover and Fuliza does not fund can also fail, so it can carry some "
+                               "signal through tight cash",
+}
 
 
 def main():

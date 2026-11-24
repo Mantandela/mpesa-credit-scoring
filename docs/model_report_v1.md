@@ -6,94 +6,94 @@ Seed 42. Split by vendor, balanced by persona. 52 features. Labels are simulated
 
 | split | vendors | applications | defaults | default_rate |
 |---|---|---|---|---|
-| train | 700 | 1561 | 275 | 0.176 |
-| val | 151 | 336 | 49 | 0.146 |
-| test | 149 | 347 | 61 | 0.176 |
+| train | 700 | 1579 | 286 | 0.181 |
+| val | 149 | 332 | 65 | 0.196 |
+| test | 151 | 350 | 64 | 0.183 |
 
 ## Tuning (train vendors only, 5-fold CV grouped by vendor)
 
 | model | best_settings | cv_auc_mean | cv_auc_sd |
 |---|---|---|---|
-| logistic | {'C': 0.01} | 0.702 | 0.034 |
-| random_forest | {'min_samples_leaf': 10} | 0.694 | 0.033 |
-| xgboost | {'max_depth': 2, 'n_estimators': 200} | 0.671 | 0.042 |
+| logistic | {'C': 0.01} | 0.717 | 0.016 |
+| random_forest | {'min_samples_leaf': 5} | 0.735 | 0.034 |
+| xgboost | {'max_depth': 2, 'n_estimators': 200} | 0.736 | 0.020 |
 
 ## Results
 
 | model | val AUC | test AUC | test AUC 95% low | test AUC 95% high | test PR-AUC | test KS | test Brier |
 |---|---|---|---|---|---|---|---|
-| logistic | 0.711 | 0.753 | 0.684 | 0.815 | 0.393 | 0.427 | 0.128 |
-| random_forest | 0.666 | 0.737 | 0.665 | 0.804 | 0.331 | 0.467 | 0.132 |
-| xgboost | 0.635 | 0.728 | 0.653 | 0.798 | 0.346 | 0.443 | 0.132 |
-| rule_baseline | 0.710 | 0.760 | 0.687 | 0.823 | 0.379 | 0.441 | nan |
-| scorecard_baseline | 0.710 | 0.762 | 0.689 | 0.824 | 0.424 | 0.467 | nan |
+| logistic | 0.776 | 0.726 | 0.646 | 0.807 | 0.398 | 0.412 | 0.132 |
+| random_forest | 0.765 | 0.757 | 0.688 | 0.823 | 0.458 | 0.394 | 0.127 |
+| xgboost | 0.760 | 0.752 | 0.681 | 0.821 | 0.439 | 0.402 | 0.128 |
+| rule_baseline | 0.752 | 0.745 | 0.671 | 0.816 | 0.441 | 0.403 | nan |
+| scorecard_baseline | 0.778 | 0.749 | 0.679 | 0.818 | 0.434 | 0.436 | nan |
 
 Intervals come from resampling test vendors 1,000 times. `rule_baseline` ranks vendors by share of near-zero-balance days with no fitting. `scorecard_baseline` is the visible cash-flow scorecard (features and weights only, no hidden terms), also with no fitting. A model should beat both clearly to justify its complexity.
 
 ## Lender view: default rate among approved applicants (test)
 
-The cutoff is set on the validation set so that the target share is approved, then applied to the test set. Default rate with no scoring on test: 17.6%.
+The cutoff is set on the validation set so that the target share is approved, then applied to the test set. Default rate with no scoring on test: 18.3%.
 
 | model | approval target | actual approval on test | default rate among approved |
 |---|---|---|---|
-| logistic | 70% | 0.657 | 0.088 |
-| logistic | 80% | 0.769 | 0.109 |
-| logistic | 90% | 0.905 | 0.146 |
-| random_forest | 70% | 0.660 | 0.079 |
-| random_forest | 80% | 0.787 | 0.128 |
-| random_forest | 90% | 0.867 | 0.146 |
-| xgboost | 70% | 0.628 | 0.078 |
-| xgboost | 80% | 0.772 | 0.123 |
-| xgboost | 90% | 0.862 | 0.140 |
-| rule_baseline | 70% | 0.657 | 0.083 |
-| rule_baseline | 80% | 0.787 | 0.117 |
-| rule_baseline | 90% | 0.905 | 0.143 |
-| scorecard_baseline | 70% | 0.692 | 0.083 |
-| scorecard_baseline | 80% | 0.813 | 0.124 |
-| scorecard_baseline | 90% | 0.925 | 0.150 |
+| logistic | 70% | 0.669 | 0.098 |
+| logistic | 80% | 0.766 | 0.112 |
+| logistic | 90% | 0.846 | 0.135 |
+| random_forest | 70% | 0.651 | 0.096 |
+| random_forest | 80% | 0.726 | 0.110 |
+| random_forest | 90% | 0.857 | 0.133 |
+| xgboost | 70% | 0.654 | 0.100 |
+| xgboost | 80% | 0.749 | 0.115 |
+| xgboost | 90% | 0.863 | 0.129 |
+| rule_baseline | 70% | 0.691 | 0.107 |
+| rule_baseline | 80% | 0.786 | 0.116 |
+| rule_baseline | 90% | 0.883 | 0.142 |
+| scorecard_baseline | 70% | 0.654 | 0.092 |
+| scorecard_baseline | 80% | 0.789 | 0.120 |
+| scorecard_baseline | 90% | 0.860 | 0.133 |
 
 ## Inside each persona (out-of-fold AUC on train + validation)
 
-If the models only recognised which persona a vendor belongs to, these numbers would sit near 0.5. Overall out-of-fold AUC: logistic 0.700, random forest 0.689, xgboost 0.683.
+If the models only recognised which persona a vendor belongs to, these numbers would sit near 0.5. Overall out-of-fold AUC: logistic 0.730, random forest 0.743, xgboost 0.740.
 
 | persona | applications | default_rate | logistic | random_forest | xgboost |
 |---|---|---|---|---|---|
-| growing | 344 | 0.073 | 0.478 | 0.468 | 0.494 |
-| new | 129 | 0.186 | 0.432 | 0.428 | 0.473 |
-| seasonal | 384 | 0.180 | 0.628 | 0.580 | 0.578 |
-| stable | 591 | 0.081 | 0.522 | 0.502 | 0.516 |
-| struggling | 449 | 0.352 | 0.574 | 0.569 | 0.544 |
+| growing | 309 | 0.097 | 0.543 | 0.621 | 0.628 |
+| new | 142 | 0.239 | 0.628 | 0.664 | 0.622 |
+| seasonal | 400 | 0.140 | 0.576 | 0.556 | 0.562 |
+| stable | 599 | 0.073 | 0.507 | 0.601 | 0.565 |
+| struggling | 461 | 0.406 | 0.597 | 0.608 | 0.597 |
 
 ## What the models use
 
 XGBoost importance (gain, top 12):
 
-- near_zero_day_share_30: 0.162
-- near_zero_day_share_60: 0.091
-- near_zero_day_share_90: 0.051
-- fuliza_funded_share_90: 0.035
-- debt_service_ratio_90: 0.033
-- income_total_90: 0.023
-- fuliza_draws_30: 0.023
-- income_count_90: 0.022
-- balance_cv_90: 0.022
-- unique_senders_30: 0.020
-- income_active_day_share_90: 0.018
-- unique_senders_60: 0.018
+- fuliza_funded_share_90: 0.103
+- amount_to_avg_monthly_income_90: 0.080
+- income_total_30: 0.059
+- debt_service_ratio_90: 0.032
+- fuliza_draws_90: 0.031
+- fee_share_of_income_90: 0.030
+- till_share_90: 0.029
+- income_total_90: 0.024
+- near_zero_day_share_60: 0.024
+- fuliza_draws_60: 0.021
+- income_total_60: 0.020
+- balance_median_eod_90: 0.019
 
 Logistic regression coefficients (inputs are rank-normalised, so sizes are comparable; positive = higher risk):
 
-- withdraw_share_of_income_30: +0.12
-- withdraw_share_of_income_60: -0.11
-- essential_outflow_share_90: -0.09
-- days_since_last_fuliza_draw: -0.09
-- near_zero_day_share_60: +0.09
-- balance_cv_90: +0.09
-- weekly_income_cv_90: +0.08
-- amount_to_income_30: -0.06
-- income_active_day_share_30: -0.06
-- fuliza_repay_lag_median_days_90 (missing flag): +0.06
-- withdraw_share_of_income_90: +0.06
+- fuliza_repay_lag_median_days_90: +0.12
+- weekly_income_cv_90: +0.11
+- income_active_day_share_30: +0.09
+- balance_median_eod_90: -0.09
+- fuliza_repay_lag_median_days_90 (missing flag): +0.08
+- withdraw_share_of_income_60: +0.07
+- fee_share_of_income_90: +0.07
 - till_share_90: -0.06
+- income_active_day_share_60: +0.06
+- net_cash_flow_ratio_90: -0.06
+- fuliza_draws_90: +0.06
+- fuliza_draws_60: +0.06
 
 Next: SHAP explanations, fairness check by gender, and the affordability simulation.

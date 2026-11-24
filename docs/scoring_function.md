@@ -20,7 +20,7 @@ from predict import score_statement, score_uploaded_file, warm_up
 warm_up()                                   # optional, at start-up: importing shap takes about 4 seconds
 result = score_statement(
     statement,                              # DataFrame of raw transactions, or a path to .xlsx / .xls / .csv
-    requested_amount=5000,                  # KES; used ONLY for the affordability block, as typed (no clipping); default = median (5,000); must be > 0
+    requested_amount=5000,                  # KES; used ONLY for the affordability block, as typed (no clipping); default = median (4,900); must be > 0
     requested_term_days=14,                 # used ONLY for the affordability block, as typed; default = median (19); must be > 0
     application_date="2026-03-15",          # default = the day after the last transaction
     model_path="models/logistic.joblib",
@@ -53,17 +53,17 @@ inputs). The requested amount and term feed only the `affordability` block.
 
 The trained model's coefficients on the request fields are not monotone. `requested_term_days` and the two
 amount-to-income ratios have small negative coefficients, so scoring the caller's request could show a larger loan as
-less risky. For the example vendor below, the PD was 13.3% at KES 1,300, 12.3% at KES 7,500 and 14.1% at KES 10,000.
-Retraining is out of scope, so:
+less risky. For the example vendor below (term 14 days), the PD would be 9.3% at KES 1,300, 10.0% at KES 5,000, 10.2%
+at KES 7,500 and 9.4% at KES 10,000. Retraining with sign constraints is out of scope, so:
 
 - the probability of default, score, tier, pillar ratings and reasons are always worked out at the **median request**
-  in `reference.json` (KES 5,000 for 19 days), whatever the caller passes. They describe the vendor, not the slider.
+  in `reference.json` (KES 4,900 for 19 days), whatever the caller passes. They describe the vendor, not the slider.
   `inputs_used.scored_at` shows the request used and the warning `score_at_median_request` says so.
 - the requested amount and term, **exactly as typed** (no clipping, since the model never sees them; only values
   <= 0 are rejected with a `ValueError`), feed the separate **`affordability`** block. It holds the same
   ratios as the features (`amount_to_income_30`, `amount_to_avg_monthly_income_90`) and an estimated repayment (the
   amount only; fees and interest are not modelled). It also gives a band on `amount_to_avg_monthly_income_90`, with
-  cutoffs at the 50th and 85th percentile of the 2,244 simulated applications. The bands are **comfortable** (at or
+  cutoffs at the 50th and 85th percentile of the 2,261 simulated applications. The bands are **comfortable** (at or
   below the 50th), **stretched** (50th to 85th) and **heavy** (above the 85th). A vendor with no customer income in the
   last 90 days gets **unknown**. With income fixed, the ratio grows with the amount and the cutoffs are fixed, so a
   larger amount never gives a better band.
@@ -80,11 +80,15 @@ status             = "eligible" if max_amount > 0 else "not_eligible";  "unknown
 
 - `tier_factor` (in `ELIGIBILITY_POLICY`): Low 0.50, Moderate 0.35, High 0.15, Very high 0 (never eligible).
 - The cutoffs are the affordability band cutoffs of `models/reference.json` (comfortable = 50th percentile, about
-  0.056; stretched = 85th percentile, about 0.419). They are read from the file, never hard-coded.
+  0.058; stretched = 85th percentile, about 0.411). They are read from the file, never hard-coded.
 - `monthly_income` is `affordability.amount_to_avg_monthly_income_90` turned back into KES: the vendor's average
   monthly customer income over the last 90 days.
-- Example (the simulated vendor above: Moderate risk, about KES 164,300 a month): up to KES 24,100
-  (0.35 x 0.4194 x 164,304 = 24,118, rounded down), comfortable up to KES 9,200 (0.0564 x 164,304 = 9,261).
+- Example (the simulated vendor below: Moderate risk, about KES 206,300 a month): up to KES 29,600
+  (0.35 x 0.4108 x 206,297 = 29,658, rounded down), comfortable up to KES 11,900 (0.0579 x 206,297 = 11,952).
+- A typical vendor of each tier (median PD and median monthly income of the simulated applications in the tier, at
+  the median request): Low risk (PD 6.2%, score 679, KES 222,000 a month) up to KES 45,500, comfortable 12,800;
+  Moderate (PD 11.2%, score 633, KES 114,600) up to KES 16,400, comfortable 6,600; High (PD 23.0%, score 571,
+  KES 35,100) up to KES 2,100, comfortable 2,000; Very high (PD 40.8%, score 511, KES 8,200) not eligible.
 
 **This is a placeholder policy for the prototype.** The tier factors are not taken from any lender's policy; monthly
 income is statement **turnover** (money received from customers), not profit; the cutoffs describe simulated
@@ -97,60 +101,68 @@ amount and term, and sends the application only if the fresh estimate is "eligib
 
 ## Output (example: a simulated vendor, 6-month statement, KES 5,000 for 14 days; numbers rounded)
 
+The example statement is kept fixed across retrains so that results can be compared: vendor V00514 of the v0.6
+seed-42 run ("new" persona, 183 days, 4,469 rows), saved before the v0.7 regeneration as
+`data/test/example_statement_V00514_v06.parquet` (git-ignored, synthetic). The regenerated V00514 is a different vendor.
+
 ```json
 {
-  "probability_of_default": 0.1244,
-  "score": 625,
+  "probability_of_default": 0.1009,
+  "score": 642,
   "tier": "Moderate risk",
   "pillar_ratings": [
-    {"pillar": "A_income_stability",   "rating": 69, "label": "Good",  "pillar_score": -0.450},
-    {"pillar": "B_cash_flow_buffer",   "rating": 49, "label": "Fair",  "pillar_score":  0.006},
-    {"pillar": "C_borrowing_distress", "rating": 56, "label": "Good",  "pillar_score": -0.011},
-    {"pillar": "D_affordability",      "rating": 58, "label": "Good",  "pillar_score": -0.013},
-    {"pillar": "E_obligations",        "rating": 13, "label": "Weak",  "pillar_score":  0.397},
-    {"pillar": "F_history_growth",     "rating": 40, "label": "Fair",  "pillar_score":  0.265},
-    {"pillar": "G_network",            "rating": 59, "label": "Good",  "pillar_score": -0.265}
+    {"pillar": "A_income_stability",   "rating": 82, "label": "Strong", "pillar_score": -0.663},
+    {"pillar": "B_cash_flow_buffer",   "rating": 91, "label": "Strong", "pillar_score": -0.540},
+    {"pillar": "C_borrowing_distress", "rating": 62, "label": "Good",   "pillar_score": -0.083},
+    {"pillar": "D_affordability",      "rating": 61, "label": "Good",   "pillar_score": -0.024},
+    {"pillar": "E_obligations",        "rating": 51, "label": "Good",   "pillar_score":  0.091},
+    {"pillar": "F_history_growth",     "rating": 44, "label": "Fair",   "pillar_score":  0.229},
+    {"pillar": "G_network",            "rating": 41, "label": "Fair",   "pillar_score":  0.156}
   ],
   "top_reasons": [
-    {"feature": "withdraw_share_of_income_30", "family": "withdraw_share_of_income",
-     "label": "cash withdrawn at agents compared with customer income (last 30 days)", "value": 1.067,
-     "direction": "raises risk", "shap_value": 0.197,
-     "sentence": "Raises your risk: cash withdrawn at agents compared with customer income (last 30 days) (high: 107%)"},
-    {"feature": "weekly_income_cv_90", "family": "weekly_income_cv_90", "label": "how much your weekly income goes up and down",
-     "value": 0.168, "direction": "lowers risk", "shap_value": -0.118,
-     "sentence": "Lowers your risk: how much your weekly income goes up and down (low: 17%)"},
     {"feature": "fuliza_draws_90", "family": "fuliza_draws", "label": "number of times you used Fuliza",
-     "value": 0.0, "direction": "lowers risk", "shap_value": -0.109,
+     "value": 0.0, "direction": "lowers risk", "shap_value": -0.223,
      "sentence": "Lowers your risk: number of times you used Fuliza (low: 0)"},
     {"feature": "net_cash_flow_ratio_90", "family": "net_cash_flow_ratio_90", "label": "income left after payments and charges",
-     "value": 0.968, "direction": "raises risk", "shap_value": 0.081,
-     "sentence": "Raises your risk: income left after payments and charges (high: 97%)"},
-    {"feature": "balance_min_eod_90", "family": "balance_min_eod_90", "label": "lowest end-of-day wallet balance",
-     "value": 2.0, "direction": "lowers risk", "shap_value": -0.075,
-     "sentence": "Lowers your risk: lowest end-of-day wallet balance (typical: KES 2)"}
+     "value": 0.959, "direction": "lowers risk", "shap_value": -0.184,
+     "sentence": "Lowers your risk: income left after payments and charges (high: 96%)"},
+    {"feature": "withdraw_share_of_income_60", "family": "withdraw_share_of_income",
+     "label": "cash withdrawn at agents compared with customer income (last 60 days)", "value": 0.975,
+     "direction": "raises risk", "shap_value": 0.115,
+     "sentence": "Raises your risk: cash withdrawn at agents compared with customer income (last 60 days) (high: 97%)"},
+    {"feature": "failed_payment_share_90", "family": "failed_payment_share_90", "label": "payments that failed",
+     "value": 0.045, "direction": "lowers risk", "shap_value": -0.084,
+     "sentence": "Lowers your risk: payments that failed (high: 5%)"},
+    {"feature": "income_active_day_share_30", "family": "income_active_day_share",
+     "label": "days with at least one customer payment (last 30 days)", "value": 0.9,
+     "direction": "raises risk", "shap_value": 0.080,
+     "sentence": "Raises your risk: days with at least one customer payment (last 30 days) (high: 90% of days)"}
   ],
   "data_notes": [
     {"family": "fuliza_repay_lag_median_days_90", "label": "typical time taken to repay Fuliza",
      "sentence": "No data in this statement on: typical time taken to repay Fuliza"}
   ],
   "affordability": {"requested_amount": 5000.0, "requested_term_days": 14.0, "estimated_repayment": 5000.0,
-                    "amount_to_income_30": 0.0319, "amount_to_avg_monthly_income_90": 0.0304, "band": "comfortable",
-                    "band_cutoffs": {"comfortable_up_to": 0.0564, "stretched_up_to": 0.4194},
+                    "amount_to_income_30": 0.0244, "amount_to_avg_monthly_income_90": 0.0242, "band": "comfortable",
+                    "band_cutoffs": {"comfortable_up_to": 0.0579, "stretched_up_to": 0.4108},
                     "note": "Compared with your income, this loan is no larger than for a typical applicant."},
   "inputs_used": {"requested_amount": 5000.0, "requested_term_days": 14.0,
-                  "scored_at": {"requested_amount": 5000.0, "requested_term_days": 19.0},
-                  "application_date": "2026-06-30", "history_days": 183.0, "transactions_used": 3425,
+                  "scored_at": {"requested_amount": 4900.0, "requested_term_days": 19.0},
+                  "application_date": "2026-07-01", "history_days": 183.0, "transactions_used": 4469,
                   "transactions_after_date_ignored": 0},
-  "warnings": [{"code": "score_at_median_request", "message": "The score is worked out for a typical loan (KES 5,000 for 19 days), so it does not depend on the loan you ask for. See 'affordability' for your request."}],
-  "explanation": {"base_value": -1.867, "logit": -1.951},
+  "warnings": [{"code": "score_at_median_request", "message": "The score is worked out for a typical loan (KES 4,900 for 19 days), so it does not depend on the loan you ask for. See 'affordability' for your request."}],
+  "explanation": {"base_value": -1.688, "logit": -2.188},
   "model_info": {"model": "logistic", "seed": 42, "n_features": 52, "settings": {"C": 0.01}, "labels": "simulated"}
 }
 ```
 
-For this vendor (about KES 164,000 of customer income a month), KES 1,000 to 7,500 is "comfortable", KES 10,000 is
-"stretched" and KES 200,000 is "heavy" (1.22 times monthly income). The PD is 0.1244 at every amount.
+For this vendor (about KES 206,300 of customer income a month), KES 1,000 to 10,000 is "comfortable", KES 20,000 is
+"stretched" and KES 200,000 is "heavy" (0.97 times monthly income). The PD is 0.1009 at every amount.
 
-- `pillar_ratings.rating`: percentile of the vendor's pillar score among the 2,244 simulated applications, flipped so
+Risk tiers (`scoring.TIER_BANDS`): Low below PD 8%, Moderate 8% to 17%, High 17% to 30%, Very high 30% and above. At
+the median request they hold 22.2%, 40.2%, 19.5% and 18.1% of the 2,261 simulated applications (mean PD 18.4%).
+
+- `pillar_ratings.rating`: percentile of the vendor's pillar score among the 2,261 simulated applications, flipped so
   100 = best. Weak < 25 <= Fair < 50 <= Good < 75 <= Strong. Worked out at the median request.
 - `top_reasons`: up to five reasons, chosen by `feature_labels.select_reasons` as follows.
   1. **Missing data is neutral.** A missing-data flag, or a feature with no data, is never a reason and never says
@@ -199,8 +211,10 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
 ## Limitations
 
 - **Simulated labels.** The model recovers a simulated scorecard; nothing here is validated on real repayment.
-- **The models do not beat the visible scorecard baseline** (docs/model_report.md). The scoring function is a working
-  pipeline with explanations, not evidence that machine learning adds value over the scorecard.
+- **No model clearly beats the visible scorecard baseline** (docs/model_report.md). On the test vendors the random
+  forest (AUC 0.757) and XGBoost (0.753) are level with the scorecard baseline (0.747) within wide, overlapping 95%
+  intervals, and the logistic regression used here scores 0.726 (cross-validated 0.723). The scoring function is a
+  working pipeline with explanations, not evidence that machine learning adds value over the scorecard.
 - **The score is evaluated at the median request.** The trained model's coefficients on the request fields are not
   monotone, so the score ignores the requested amount and term and affordability is reported separately. A
   larger loan therefore does not change the score; it shows only in the affordability band. Fixing this properly
@@ -213,8 +227,8 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
 - **Thin history.** Below 90 days several features are missing and are filled with training medians (plus missing
   flags); the score leans on the population average. The `thin_history` warning says so.
 - **Reasons explain the model, not causes.** Grouping families and measure groups removes the obvious
-  contradictions, but a reason can still look odd. In the example above, having most income left after payments
-  raises risk, because the coefficient carries the effect of correlated features.
+  contradictions, but a reason can still look odd. In the example above, a higher share of failed payments lowers
+  risk and selling on more days raises it, because each coefficient carries the effect of correlated features.
 - **Requests outside the simulated range.** The simulated loans run from KES 1,300 to 10,000 (1st to 99th
   percentile). A larger request is assessed as typed in the affordability block (so it can reach "heavy"), with the
   information warning `request_outside_training_range`; the band then compares it with simulated requests it is far

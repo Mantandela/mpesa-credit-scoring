@@ -1,6 +1,6 @@
 # Sensitivity report: scorecard weights and hidden shock
 
-2244 applications, 1000 vendors, 52 features, seed 42. Each variant redraws `defaulted` from a different scorecard (weights or shock size) for the same applications and retrains the models. All outcomes are simulated, so these numbers show how well the models recover simulated labels, not performance on real borrowers.
+2261 applications, 1000 vendors, 52 features, seed 42. Each variant redraws `defaulted` from a different scorecard (weights or shock size) for the same applications and retrains the models. All outcomes are simulated, so these numbers show how well the models recover simulated labels, not performance on real borrowers.
 
 Published cash-flow-only models reached AUCs of about 0.53 to 0.73 (CRA for FinRegLab, 2019), a useful reference for how predictable real defaults are.
 
@@ -10,23 +10,23 @@ Best possible AUC is the scorecard probability itself. Persona only is the AUC f
 
 | variant | default rate | late share | best possible AUC | persona only | inside a persona |
 |---|---|---|---|---|---|
-| author, shock 0.5 | 0.172 | 0.066 | 0.760 | 0.714 | 0.639 |
-| equal, shock 0.5 | 0.172 | 0.066 | 0.757 | 0.707 | 0.644 |
-| cashflow_heavy, shock 0.5 | 0.173 | 0.066 | 0.776 | 0.731 | 0.646 |
-| fico_like, shock 0.5 | 0.175 | 0.066 | 0.740 | 0.688 | 0.643 |
-| author, shock 0.25 | 0.179 | 0.066 | 0.758 | 0.729 | 0.590 |
-| author, shock 0.9 | 0.172 | 0.065 | 0.799 | 0.714 | 0.734 |
+| author, shock 0.5 | 0.182 | 0.103 | 0.773 | 0.721 | 0.673 |
+| equal, shock 0.5 | 0.184 | 0.103 | 0.770 | 0.721 | 0.654 |
+| cashflow_heavy, shock 0.5 | 0.183 | 0.103 | 0.776 | 0.724 | 0.674 |
+| fico_like, shock 0.5 | 0.184 | 0.103 | 0.761 | 0.707 | 0.664 |
+| author, shock 0.25 | 0.183 | 0.104 | 0.772 | 0.736 | 0.634 |
+| author, shock 0.9 | 0.180 | 0.102 | 0.797 | 0.707 | 0.733 |
 
 ## 2. Test AUC with 95% interval (vendors never seen in training)
 
 | variant | test defaults | logistic | random_forest | xgboost | scorecard_baseline | rule_baseline |
 |---|---|---|---|---|---|---|
-| author, shock 0.5 | 64 of 347 | 0.759 (0.69 to 0.82) | 0.732 (0.66 to 0.80) | 0.713 (0.63 to 0.79) | 0.770 (0.70 to 0.84) | 0.772 (0.70 to 0.83) |
-| equal, shock 0.5 | 61 of 347 | 0.753 (0.68 to 0.81) | 0.737 (0.66 to 0.80) | 0.728 (0.65 to 0.80) | 0.762 (0.69 to 0.82) | 0.760 (0.69 to 0.82) |
-| cashflow_heavy, shock 0.5 | 65 of 347 | 0.778 (0.71 to 0.84) | 0.751 (0.68 to 0.81) | 0.724 (0.65 to 0.79) | 0.784 (0.71 to 0.84) | 0.786 (0.72 to 0.84) |
-| fico_like, shock 0.5 | 62 of 347 | 0.733 (0.66 to 0.80) | 0.727 (0.65 to 0.79) | 0.716 (0.63 to 0.79) | 0.746 (0.67 to 0.81) | 0.746 (0.68 to 0.81) |
-| author, shock 0.25 | 67 of 347 | 0.768 (0.70 to 0.83) | 0.753 (0.68 to 0.81) | 0.722 (0.64 to 0.79) | 0.773 (0.70 to 0.83) | 0.771 (0.70 to 0.83) |
-| author, shock 0.9 | 62 of 347 | 0.751 (0.68 to 0.82) | 0.716 (0.65 to 0.79) | 0.703 (0.63 to 0.77) | 0.756 (0.68 to 0.83) | 0.759 (0.69 to 0.83) |
+| author, shock 0.5 | 62 of 350 | 0.726 (0.64 to 0.81) | 0.757 (0.69 to 0.82) | 0.753 (0.68 to 0.83) | 0.747 (0.67 to 0.82) | 0.746 (0.67 to 0.82) |
+| equal, shock 0.5 | 64 of 350 | 0.726 (0.65 to 0.81) | 0.757 (0.69 to 0.82) | 0.752 (0.68 to 0.82) | 0.749 (0.68 to 0.82) | 0.745 (0.67 to 0.82) |
+| cashflow_heavy, shock 0.5 | 60 of 350 | 0.742 (0.67 to 0.82) | 0.776 (0.71 to 0.84) | 0.763 (0.69 to 0.83) | 0.767 (0.70 to 0.83) | 0.766 (0.69 to 0.83) |
+| fico_like, shock 0.5 | 63 of 350 | 0.712 (0.63 to 0.79) | 0.749 (0.68 to 0.82) | 0.737 (0.66 to 0.81) | 0.734 (0.66 to 0.81) | 0.735 (0.66 to 0.81) |
+| author, shock 0.25 | 63 of 350 | 0.783 (0.72 to 0.85) | 0.798 (0.73 to 0.86) | 0.779 (0.71 to 0.85) | 0.804 (0.74 to 0.86) | 0.800 (0.73 to 0.86) |
+| author, shock 0.9 | 65 of 350 | 0.730 (0.65 to 0.81) | 0.770 (0.70 to 0.83) | 0.743 (0.67 to 0.81) | 0.757 (0.68 to 0.83) | 0.760 (0.69 to 0.83) |
 
 `scorecard_baseline` is the visible scorecard (features and weights, no fitting). `rule_baseline` ranks only by near-zero-balance days.
 
@@ -36,12 +36,12 @@ More applications than the test set, so less noisy. This is the main comparison 
 
 | variant | logistic | random_forest | xgboost |
 |---|---|---|---|
-| author, shock 0.5 | 0.710 | 0.708 | 0.700 |
-| equal, shock 0.5 | 0.700 | 0.689 | 0.683 |
-| cashflow_heavy, shock 0.5 | 0.734 | 0.725 | 0.721 |
-| fico_like, shock 0.5 | 0.686 | 0.673 | 0.663 |
-| author, shock 0.25 | 0.732 | 0.715 | 0.708 |
-| author, shock 0.9 | 0.703 | 0.702 | 0.689 |
+| author, shock 0.5 | 0.733 | 0.742 | 0.734 |
+| equal, shock 0.5 | 0.730 | 0.743 | 0.740 |
+| cashflow_heavy, shock 0.5 | 0.741 | 0.756 | 0.749 |
+| fico_like, shock 0.5 | 0.723 | 0.735 | 0.730 |
+| author, shock 0.25 | 0.744 | 0.746 | 0.734 |
+| author, shock 0.9 | 0.717 | 0.715 | 0.707 |
 
 ## 4. Share of the achievable gain captured
 
@@ -49,22 +49,22 @@ More applications than the test set, so less noisy. This is the main comparison 
 
 | variant | logistic | random_forest | xgboost |
 |---|---|---|---|
-| author, shock 0.5 | 81% | 80% | 77% |
-| equal, shock 0.5 | 78% | 74% | 71% |
-| cashflow_heavy, shock 0.5 | 85% | 82% | 80% |
-| fico_like, shock 0.5 | 77% | 72% | 68% |
-| author, shock 0.25 | 90% | 83% | 80% |
-| author, shock 0.9 | 68% | 68% | 63% |
+| author, shock 0.5 | 85% | 89% | 86% |
+| equal, shock 0.5 | 85% | 90% | 89% |
+| cashflow_heavy, shock 0.5 | 87% | 93% | 90% |
+| fico_like, shock 0.5 | 85% | 90% | 88% |
+| author, shock 0.25 | 90% | 90% | 86% |
+| author, shock 0.9 | 73% | 72% | 70% |
 
 ## 5. Lender view: default rate among approved applicants when 80% are approved (test)
 
 | variant | no scoring | logistic | random_forest | xgboost | scorecard_baseline | rule_baseline |
 |---|---|---|---|---|---|---|
-| author, shock 0.5 | 0.184 | 0.110 | 0.133 | 0.134 | 0.114 | 0.125 |
-| equal, shock 0.5 | 0.176 | 0.109 | 0.128 | 0.123 | 0.124 | 0.117 |
-| cashflow_heavy, shock 0.5 | 0.187 | 0.104 | 0.137 | 0.139 | 0.117 | 0.121 |
-| fico_like, shock 0.5 | 0.179 | 0.124 | 0.126 | 0.122 | 0.118 | 0.125 |
-| author, shock 0.25 | 0.193 | 0.108 | 0.137 | 0.144 | 0.114 | 0.125 |
-| author, shock 0.9 | 0.179 | 0.118 | 0.143 | 0.152 | 0.114 | 0.125 |
+| author, shock 0.5 | 0.177 | 0.112 | 0.106 | 0.101 | 0.114 | 0.113 |
+| equal, shock 0.5 | 0.183 | 0.112 | 0.110 | 0.115 | 0.120 | 0.116 |
+| cashflow_heavy, shock 0.5 | 0.171 | 0.107 | 0.108 | 0.108 | 0.111 | 0.105 |
+| fico_like, shock 0.5 | 0.180 | 0.117 | 0.115 | 0.112 | 0.121 | 0.116 |
+| author, shock 0.25 | 0.180 | 0.101 | 0.098 | 0.100 | 0.103 | 0.098 |
+| author, shock 0.9 | 0.186 | 0.113 | 0.110 | 0.119 | 0.121 | 0.120 |
 
 Per-variant detail is in docs/model_report_v<number>.md (numbers follow the order of the tables).

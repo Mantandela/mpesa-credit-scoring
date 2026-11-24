@@ -82,12 +82,19 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
     hours /= hours.sum()
 
     state = {"bal": int(rng.integers(200, 2000)), "out": 0, "last": 0}
-    day_in = []                                   # daily inflow totals, for supplier and bill amounts
+    day_in = []                                   # daily inflow totals
     cust_pool, supplier_ids = [], [hid("CP_", vid, "sup", k) for k in range(3)]
     biller_ids = [hid("CP_", vid, "bill", k) for k in range(2)]
     pending_bills = {}
     cv = v["weekly_cv"]
     week_factor = 1.0
+    # Supplier and bill payments (assumptions.md row 8). The supplier payment is a share of the takings since the last
+    # supplier day, the bill a share of the takings since the last bill day. At the start of each supplier week the
+    # vendor decides whether it will pay the supplier; on the bill day, whether it pays the bill on time. A wallet that
+    # cannot cover such a payment is topped up with a cash deposit at an agent first, so supplier_prob and bill_miss set
+    # how regular the payments are, not the payment's size against a wallet emptied by the end-of-day withdrawal.
+    sup = {"plan": False, "share": 0.0, "due": 0.0}      # this week: will the vendor pay? its share; amount so far
+    bill = {"share": 0.0, "due": 0.0}                     # this bill month: its share; amount so far
 
     def emit(t, details, status, paid_in, withdrawn, cp, ttype):
         t = max(int(t), state["last"] + 1)
@@ -140,6 +147,12 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
             after_inflow(state["last"])
         return True
 
+    def top_up(t, need):
+        """Cash deposit at an agent so the wallet covers a planned payment (Fuliza is repaid from it first)."""
+        if state["bal"] < need:
+            dep = int(math.ceil((need - state["bal"] + state["out"]) / 10.0)) * 10
+            inflow(t, dep, f"Deposit of Funds at Agent - {v['agent']}", "", "DEPOSIT_AGENT")
+
     def new_or_repeat_customer():
         if cust_pool and rng.random() < v["repeat"]:
             return cust_pool[int(rng.integers(0, len(cust_pool)))]
@@ -177,29 +190,40 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
                     kind = "till_in" if is_till[k] else "send_in"
                     events.append((int(secs[k]), kind, amt, new_or_repeat_customer()))
 
-        if active and rng.random() < v["fuliza_prop"] * C.SMALL_RESTOCK_PER_WEEK / 7:
-            events.append((int(rng.integers(9, 17)) * 3600, "supplier", int(rng.integers(*C.SMALL_RESTOCK_AMOUNT)) // 10 * 10,
-                           supplier_ids[int(rng.integers(0, 3))]))
+        # Small mid-week restocks: as often as the vendor restocks at all (supplier_prob), as much as it uses Fuliza
+        # (fuliza_prop), following its sales level (trend, season, shock). Bought at dawn, before the day's sales, so
+        # a wallet emptied the night before needs Fuliza, repaid from the first sales. A growing vendor restocks with
+        # Fuliza more and more often; a struggling vendor rarely restocks, and less over time (personas.md).
+        level = trend * math.sqrt(s) * shock_mult
+        p_restock = v["supplier_prob"] * v["fuliza_prop"] * C.SMALL_RESTOCK_PER_WEEK / 7 * level
+        if active and rng.random() < min(p_restock, 1.0):
+            events.append((int(rng.integers(*C.SMALL_RESTOCK_HOURS)) * 3600, "supplier",
+                           int(rng.integers(*C.SMALL_RESTOCK_AMOUNT)) // 10 * 10, supplier_ids[int(rng.integers(0, 3))]))
 
         if rng.random() < C.DEPOSIT_PROB_PER_DAY:
             events.append((int(rng.integers(8, 17)) * 3600, "deposit", int(rng.integers(*C.DEPOSIT_AMOUNT)) // 10 * 10, ""))
 
-        # supplier payment once a week
+        # planned supplier payment once a week: its share of the takings since the last supplier day
         if wd == v["supplier_dow"]:
-            p_sup = float(np.clip(v["supplier_prob"] * math.sqrt(s), 0, 1))
-            if rng.random() < p_sup and day_in:
-                base = sum(day_in[-7:])
-                amt = int(base * rng.uniform(*C.SUPPLIER_SHARE_OF_WEEK)) // 10 * 10
-                if amt >= 50:
-                    events.append((int(rng.integers(7, 11)) * 3600, "supplier", amt, supplier_ids[int(rng.integers(0, 3))]))
-        # monthly bill
+            amt = int(sup["due"]) // 10 * 10
+            if sup["plan"] and amt >= 50:
+                events.append((int(rng.integers(7, 11)) * 3600, "supplier_planned", amt, supplier_ids[int(rng.integers(0, 3))]))
+        if d == 0 or wd == v["supplier_dow"]:                     # a new supplier week starts
+            # how often the vendor pays its supplier follows its sales level, like the restocks
+            sup["plan"] = rng.random() < float(np.clip(v["supplier_prob"] * level, 0, 1))
+            sup["share"], sup["due"] = (rng.uniform(*C.SUPPLIER_SHARE_OF_WEEK) if sup["plan"] else 0.0), 0.0
+        # monthly bill: its share of the takings since the last bill day. Paid on time (topped up if needed) with
+        # chance 1 - bill_miss, lower in a seasonal vendor's off-peak months (personas.md); otherwise it may be paid
+        # late, without a top-up, so a late bill can still fail or need Fuliza
         if date.day == v["bill_dom"] and day_in:
-            amt = int(sum(day_in[-30:]) * rng.uniform(*C.BILL_SHARE_OF_MONTH)) // 10 * 10
+            amt = int(bill["due"]) // 10 * 10
             if amt >= 100:
-                if rng.random() >= v["bill_miss"]:
-                    events.append((int(rng.integers(8, 15)) * 3600, "bill", amt, biller_ids[int(rng.integers(0, 2))]))
-                elif rng.random() < 0.5:
+                if rng.random() < (1 - v["bill_miss"]) * min(1.0, s):
+                    events.append((int(rng.integers(8, 15)) * 3600, "bill_planned", amt, biller_ids[int(rng.integers(0, 2))]))
+                elif rng.random() < C.LATE_BILL_PROB:
                     pending_bills[d + int(rng.integers(5, 13))] = amt
+        if d == 0 or date.day == v["bill_dom"]:                   # a new bill month starts
+            bill["share"], bill["due"] = rng.uniform(*C.BILL_SHARE_OF_MONTH), 0.0
         if d in pending_bills:
             events.append((int(rng.integers(9, 16)) * 3600, "bill", pending_bills.pop(d), biller_ids[int(rng.integers(0, 2))]))
         # personal send money and airtime
@@ -221,10 +245,14 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
                 inflow_total += amt
             elif kind == "deposit":
                 inflow(t, amt, f"Deposit of Funds at Agent - {v['agent']}", "", "DEPOSIT_AGENT")
-            elif kind == "supplier":
+            elif kind in ("supplier", "supplier_planned"):
+                if kind == "supplier_planned":
+                    top_up(t, amt)
                 pay(t, amt, "BUY_GOODS_OUT", f"Merchant Payment to {v['till']} - {cp}",
                     f"Merchant Payment Fuliza M-Pesa to {v['till']} - {cp}", cp, None, "")
-            elif kind == "bill":
+            elif kind in ("bill", "bill_planned"):
+                if kind == "bill_planned":
+                    top_up(t, amt + tariff(C.PAYBILL_FEE, amt))
                 pay(t, amt, "PAYBILL_OUT", f"Pay Bill to {v['paybill']} - {cp} Acc. {vid}",
                     f"Pay Bill Fuliza M-Pesa to {v['paybill']} - {cp} Acc. {vid}", cp, C.PAYBILL_FEE, "Pay Bill Charge")
             elif kind == "send_out":
@@ -234,6 +262,8 @@ def simulate_vendor(rng, v, end_date, out, n_days, shocks):
                 pay(t, amt, "AIRTIME_OUT", "Airtime Purchase", "Airtime Purchase Fuliza M-Pesa", "", None, "")
 
         day_in.append(inflow_total)
+        sup["due"] += sup["share"] * inflow_total
+        bill["due"] += bill["share"] * inflow_total
 
         # end of day: cash withdrawal at an agent
         if active and state["bal"] >= C.MIN_WITHDRAWAL and rng.random() < v["sweep_prob"]:

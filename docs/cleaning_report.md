@@ -1,23 +1,23 @@
 # Cleaning report
 
-10,915,450 lines, 1000 vendors
+10,639,737 lines, 1000 vendors
 
 ## Rows per txn_type
 
 | txn_type | rows | share |
 |---|---|---|
-| SEND_MONEY_IN | 6,294,489 | 57.7% |
-| TILL_PAYMENT_IN | 3,854,317 | 35.3% |
-| FEE | 244,329 | 2.2% |
-| WITHDRAW_AGENT | 200,095 | 1.8% |
-| AIRTIME_OUT | 89,950 | 0.8% |
-| BUY_GOODS_OUT | 76,866 | 0.7% |
-| FULIZA_REPAY | 67,669 | 0.6% |
-| SEND_MONEY_OUT | 41,177 | 0.4% |
-| FULIZA_DRAW | 27,210 | 0.2% |
-| DEPOSIT_AGENT | 11,204 | 0.1% |
-| PAYBILL_OUT | 7,517 | 0.1% |
-| REVERSAL | 627 | 0.0% |
+| SEND_MONEY_IN | 6,126,026 | 57.6% |
+| TILL_PAYMENT_IN | 3,705,057 | 34.8% |
+| FEE | 251,546 | 2.4% |
+| WITHDRAW_AGENT | 199,727 | 1.9% |
+| BUY_GOODS_OUT | 92,584 | 0.9% |
+| AIRTIME_OUT | 87,110 | 0.8% |
+| DEPOSIT_AGENT | 61,038 | 0.6% |
+| FULIZA_REPAY | 41,856 | 0.4% |
+| SEND_MONEY_OUT | 39,736 | 0.4% |
+| FULIZA_DRAW | 19,693 | 0.2% |
+| PAYBILL_OUT | 14,704 | 0.1% |
+| REVERSAL | 660 | 0.0% |
 
 ## Validation flags
 
@@ -31,9 +31,9 @@
 | flag_negative | 0 |
 | flag_unknown_wording | 0 |
 | duplicate receipt_no across the whole file | 0 |
-| is_failed (status Failed) | 14,945 |
-| fuliza_funded payments | 27,210 |
+| is_failed (status Failed) | 5,898 |
+| fuliza_funded payments | 19,693 |
 
 ## Check against txn_type_true (synthetic data only)
 
-Agreement: 100.0000% of 10,915,450 rows
+Agreement: 100.0000% of 10,639,737 rows
