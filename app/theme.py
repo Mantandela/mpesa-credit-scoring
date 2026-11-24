@@ -8,6 +8,7 @@ frame, with the tab bar fixed to the frame's bottom edge. At 600px and below the
 
 Containers are styled through their keys: "card_*" white card, "hero" gradient card, "row_*" list row with a chevron,
 "topbar" the top bar ("topbar_menu" its menu button), "menu_*" the items of the menu dialog, "bottom_nav" the tab bar.
+Sign in and Create account add AUTH_CSS (navy band, "auth_card" card, footer), injected by those two pages only.
 
 Icons are simple inline SVG line icons. Buttons cannot hold SVG markup, so their icons are the same SVGs as CSS data
 URIs (see icon_uri); everywhere else they are inline <svg> elements (components.icon).
@@ -45,6 +46,8 @@ ICONS = {
     "shield": '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/>',
     "chart": '<path d="M4 19h16"/><path d="M6 15l4-4 3 3 5-6"/>',
     "logout": '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h10"/>',
+    "alert": '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5h.01"/>',
+    "lock": '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
 }
 
 
@@ -258,17 +261,6 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
   justify-content: center; flex: 0 0 48px; }
 .icon-circle.lg { width: 64px; height: 64px; flex-basis: 64px; margin: 4px auto 0 auto; }
 
-/* sign in / sign up header */
-.auth-head { position: relative; overflow: hidden; margin: -18px -20px 6px -20px; padding: 34px 24px 30px 24px;
-  background: linear-gradient(160deg, #4A2FB0 0%, #7C5CE0 100%); border-radius: 0 0 36px 36px; color: #FFFFFF; }
-.auth-head::after { content: ""; position: absolute; width: 200px; height: 200px; border-radius: 50%;
-  background: rgba(255,255,255,0.10); top: -70px; right: -60px; }
-.auth-brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; color: #FFFFFF; }
-.logo { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
-  border-radius: 12px; background: #FFFFFF; }
-.auth-title { font-size: 28px; font-weight: 700; margin-top: 26px; color: #FFFFFF; }
-.auth-sub { font-size: 14px; color: #FFFFFF; margin-top: 4px; }
-
 /* sent */
 .done-circle { width: 96px; height: 96px; border-radius: 50%; margin: 8px auto 0 auto;
   background: linear-gradient(135deg, #4A2FB0 0%, #7C5CE0 100%); display: flex; align-items: center; justify-content: center;
@@ -299,6 +291,95 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 
 def css() -> str:
     return CSS.replace("</style>", _icon_css() + "\n</style>")
+
+
+# Sign in and Create account only (injected by those two pages, after the main theme). Every rule is scoped to the
+# navy band (.auth-band), the card (st-key-auth_card) or the footer (.auth-foot), so nothing here reaches other pages.
+NAVY = "#0F172A"
+AUTH_POINT = "#C7D2FE"      # the three lines in the band
+AUTH_TICK = "#A5B4FC"       # their check-circle icons
+ERROR = "#B42318"
+
+AUTH_CSS = """
+<style>
+/* the band and card fill the frame edge to edge, so the frame drops its side and top padding on these pages */
+[data-testid="stMainBlockContainer"]:has(.auth-band) { padding: 0 0 32px 0 !important; }
+
+/* navy header band */
+.auth-band { background: #0F172A; color: #FFFFFF; padding: 26px 24px 58px 24px; }
+.auth-brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 500; line-height: 1.2;
+  color: #FFFFFF; }
+.auth-logo { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+  flex: 0 0 40px; border-radius: 12px; background: #5B3FC4; }
+.auth-headline { font-size: 22px; font-weight: 500; line-height: 1.3; color: #FFFFFF; margin: 22px 0 14px 0; }
+.auth-headline .nowrap { white-space: nowrap; }
+.stApp ul.auth-points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.stApp ul.auth-points li { display: flex; align-items: center; gap: 8px; margin: 0; padding: 0; font-size: 13px;
+  line-height: 1.35; color: #C7D2FE; }
+.auth-points svg { flex: 0 0 16px; }
+
+/* white card overlapping the band by 36px (the extra 12px cancels the block gap above it) */
+.st-key-auth_card { background: #FFFFFF; border: 0.5px solid #E3DDF5; border-radius: 20px; padding: 18px;
+  margin: -48px 14px 0 14px; width: auto !important; box-sizing: border-box; position: relative; z-index: 1;
+  gap: 14px !important; }
+.st-key-auth_card [data-testid="stForm"] { border: none; padding: 0; border-radius: 0; }
+.st-key-auth_card [data-testid="stForm"] [data-testid="stVerticalBlock"] { gap: 12px; }
+.auth-title { font-size: 20px; font-weight: 500; line-height: 1.25; color: #1D1B3A; margin: 0; }
+.auth-sub { font-size: 13px; color: #6B6B85; margin: 2px 0 0 0; }
+
+/* fields: 46px, 12px radius, hairline lavender border, purple focus ring */
+.st-key-auth_card [data-testid="stWidgetLabel"] p { font-size: 13px !important; font-weight: 500 !important; }
+.st-key-auth_card [data-testid="stTextInputRootElement"] { height: 46px !important; min-height: 46px;
+  border: 1.5px solid #E3DDF5 !important; border-radius: 12px !important; background: #FFFFFF !important; }
+.st-key-auth_card [data-testid="stTextInputRootElement"]:focus-within { border-color: #5B3FC4 !important;
+  box-shadow: 0 0 0 3px rgba(91,63,196,0.30); }
+.st-key-auth_card input::placeholder { color: #6B6B85; opacity: 1; }
+/* Streamlit's "Press Enter to submit form" hint crowds the field (and the reveal icon) at phone width; Enter still submits */
+.st-key-auth_card [data-testid="InputInstructions"] { display: none; }
+/* Streamlit's own password reveal button sits inside the field (which clips overflow): ring drawn inside it */
+.st-key-auth_card [data-testid="stTextInputRootElement"] button { background: #FFFFFF !important; }
+.st-key-auth_card [data-testid="stTextInputRootElement"] button:focus-visible { outline: 2px solid #5B3FC4 !important;
+  outline-offset: -4px; border-radius: 10px; }
+
+/* full-width submit button; a small spinner shows on it while the sign-in or sign-up runs */
+.st-key-auth_card .stFormSubmitButton > button { width: 100%; height: 48px; min-height: 48px; border-radius: 14px;
+  background: #5B3FC4; border: none; box-shadow: none; color: #FFFFFF; gap: 8px; }
+.st-key-auth_card .stFormSubmitButton > button p { font-size: 15px; font-weight: 500; color: #FFFFFF; }
+.st-key-auth_card .stFormSubmitButton > button:hover { background: #4A2FB0; color: #FFFFFF; }
+.st-key-auth_card .stFormSubmitButton > button:focus-visible { outline: 2px solid #5B3FC4; outline-offset: 2px; }
+.stApp[data-test-script-state="running"] .st-key-auth_card [data-testid="stForm"]:focus-within .stFormSubmitButton > button {
+  background: #4A2FB0; pointer-events: none; cursor: progress; }
+.stApp[data-test-script-state="running"] .st-key-auth_card [data-testid="stForm"]:focus-within .stFormSubmitButton > button::after {
+  content: ""; width: 16px; height: 16px; flex: 0 0 16px; box-sizing: border-box; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.45); border-top-color: #FFFFFF; animation: auth-spin 0.7s linear infinite; }
+@keyframes auth-spin { to { transform: rotate(360deg); } }
+
+/* "New vendor? Create an account": muted question, purple link (the label's bold part) */
+.st-key-to_signup button, .st-key-to_signin button { min-height: 32px !important; height: auto !important;
+  padding: 4px 8px !important; border-radius: 8px !important; }
+.st-key-to_signup button p, .st-key-to_signin button p { font-size: 13px !important; font-weight: 400 !important;
+  color: #6B6B85 !important; }
+.st-key-to_signup button p strong, .st-key-to_signin button p strong { color: #5B3FC4; font-weight: 500; }
+.st-key-to_signup button:hover p strong, .st-key-to_signin button:hover p strong { text-decoration: underline; }
+.st-key-to_signup button:focus-visible, .st-key-to_signin button:focus-visible { outline: 2px solid #5B3FC4 !important;
+  outline-offset: 0; }
+
+/* errors: red text with a small icon, no box */
+.auth-error { display: flex; align-items: flex-start; gap: 6px; margin: -4px 0 0 0; font-size: 13px; font-weight: 500;
+  line-height: 1.35; color: #B42318; }
+.auth-error svg { flex: 0 0 16px; margin-top: 1px; }
+
+/* footer line under the card */
+.auth-foot { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 16px 0 16px;
+  font-size: 12px; line-height: 1.35; color: #6B6B85; text-align: center; }
+.auth-foot svg { flex: 0 0 14px; }
+</style>
+"""
+
+
+def inject_auth() -> None:
+    """The Sign in / Create account styles, injected like the main theme (st.markdown, hidden wrapper)."""
+    st.markdown(AUTH_CSS, unsafe_allow_html=True)
 
 
 def inject() -> None:

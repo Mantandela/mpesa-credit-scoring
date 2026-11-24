@@ -201,9 +201,37 @@ def hero(score=None, tier: str | None = None, line: str | None = None, cta: bool
              f'<div class="hero-tier">{status_text(tier, on_hero=True)}</div>{extra}</div>')
 
 
-def auth_header(heading: str, sub: str) -> None:
-    html(f'<div class="auth-head"><div class="auth-brand"><span class="logo">{icon("logo", theme.PURPLE, 24)}</span>'
-         f'{APP_NAME}</div><div class="auth-title">{escape(heading)}</div><div class="auth-sub">{escape(sub)}</div></div>')
+# ------------------------------------------------------------------ sign in / create account
+AUTH_HEADLINE = "Know your credit score from your M-Pesa statement"
+AUTH_POINTS = ("Score an Excel or CSV statement in seconds", "See what lifts or drags your score",
+               "Find out how much you can borrow")
+AUTH_FOOTER = "Your statement is read once and never stored."
+
+
+def auth_band() -> None:
+    """The navy header band of Sign in and Create account (identical on both, so switching does not shift the
+    layout). Also injects the auth styles (theme.AUTH_CSS)."""
+    theme.inject_auth()
+    points = "".join(f'<li>{icon("check_circle", theme.AUTH_TICK, 16)}<span>{escape(p)}</span></li>' for p in AUTH_POINTS)
+    headline = escape(AUTH_HEADLINE).replace("M-Pesa", '<span class="nowrap">M-Pesa</span>')   # never break at the hyphen
+    html(f'<div class="auth-band"><div class="auth-brand"><span class="auth-logo">{icon("logo", "#FFFFFF", 22)}</span>'
+         f'<span>{escape(APP_NAME)}</span></div><div class="auth-headline">{headline}</div>'
+         f'<ul class="auth-points">{points}</ul></div>')
+
+
+def auth_title(heading: str, sub: str) -> None:
+    html(f'<div class="auth-title" role="heading" aria-level="1">{escape(heading)}</div>'
+         f'<div class="auth-sub">{escape(sub)}</div>')
+
+
+def auth_error(text: str, where=st) -> None:
+    """A sign-in or sign-up message: red text with a small icon, no box (read out by screen readers)."""
+    where.markdown(f'<div class="auth-error" role="alert">{icon("alert", theme.ERROR, 16)}<span>{escape(text)}</span></div>',
+                   unsafe_allow_html=True)
+
+
+def auth_footer() -> None:
+    html(f'<div class="auth-foot">{icon("lock", theme.MUTED, 14)}<span>{escape(AUTH_FOOTER)}</span></div>')
 
 
 NAV_TABS = (("home", "Home"), ("score", "Score"), ("history", "History"), ("profile", "Profile"))

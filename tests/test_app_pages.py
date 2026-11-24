@@ -7,7 +7,9 @@ import logging
 import re
 
 import pytest
+from streamlit.proto.TextInput_pb2 import TextInput as TextInputProto
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Block
 
 import app_helpers as H
 import toy
@@ -68,13 +70,66 @@ def _sign_in(at, email, password):
 
 
 # ---------------------------------------------------------------- sign in and roles
+def _flow(at) -> list:
+    """The screen in display order as (type, key) for inputs and buttons and ("markdown", html) for markdown."""
+    out = []
+
+    def walk(node):
+        if isinstance(node, Block):
+            for i in sorted(node.children):
+                walk(node.children[i])
+        elif node.type == "markdown" and "<style>" not in node.value:
+            out.append(("markdown", node.value))
+        elif node.type in ("text_input", "button"):
+            out.append((node.type, node.key))
+    walk(at.main)
+    return out
+
+
 def test_sign_in_renders(env):
     at = _app()
     _no_errors(at)
     text = _text(at)
-    assert "Welcome back" in text and "Forgot password?" in text and "New vendor? Create an account" in text
+    assert "Welcome back" in text and "Sign in to check your score" in text
     assert [t.label for t in at.text_input] == ["Email", "Password"]
-    assert not [b for b in at.button if b.key.startswith("nav_")]                  # no tab bar before sign in
+    assert at.text_input(key="signin_password").proto.type == TextInputProto.PASSWORD   # built-in reveal control
+    assert at.button(key="to_signup").label == "New vendor? **Create an account**"      # bold part is the purple link
+    assert not [b for b in at.button if b.key.startswith(("nav_", "topbar_"))]     # no tab bar or top bar before sign in
+
+
+def test_sign_up_renders(env):
+    at = _app(page="signup")
+    _no_errors(at)
+    text = _text(at)
+    assert "Create your account" in text and "Takes less than a minute" in text
+    assert [t.label for t in at.text_input] == ["Full name", "Email", "Password", "Confirm password"]
+    assert at.button(key="signup_submit").label == "Create account"
+    assert at.button(key="to_signin").label == "Already have an account? **Sign in**"
+    assert not [b for b in at.button if b.key.startswith(("nav_", "topbar_"))]
+
+
+@pytest.mark.parametrize("page, form, submit", [("signin", "signin_form", "signin_submit"),
+                                                ("signup", "signup_form", "signup_submit")])
+def test_auth_pages_are_forms_so_enter_submits(env, page, form, submit):
+    at = _app(page=page)
+    button = at.button(key=submit)
+    assert button.proto.is_form_submitter and button.proto.form_id == form
+    assert all(t.proto.form_id == form for t in at.text_input)                   # every field is in the form
+    link = at.button(key="to_signup" if page == "signin" else "to_signin")
+    assert not link.proto.form_id                                                  # the link is outside the form
+
+
+@pytest.mark.parametrize("page", ["signin", "signup"])
+def test_auth_pages_have_no_reset_link_demo_shortcut_or_old_copy(env, page):
+    at = _app(page=page)
+    _no_errors(at)
+    text = _text(at)
+    for gone in ("Forgot password", "Demo", "580", "simulat", "pillar"):
+        assert gone.lower() not in text.lower(), gone
+    assert [b.key for b in at.button] == [f"{page}_submit", "to_signup" if page == "signin" else "to_signin"]
+    # the shared band and footer
+    assert components.APP_NAME in text and "Know your credit score from your" in text
+    assert all(p in text for p in components.AUTH_POINTS) and components.AUTH_FOOTER in text
 
 
 def test_vendor_signs_in_and_reaches_home(env):
@@ -160,9 +215,51 @@ def test_menu_opens_lists_six_items_and_navigates(env):
 
 
 def test_wrong_password_shows_one_generic_message(env):
-    at = _sign_in(_app(), "vendor@example.com", "wrong-password")
+    assert auth.SIGN_IN_FAILED == "Email or password is incorrect."                # the message text is unchanged
+    for email in ("vendor@example.com", "nobody@example.com"):                     # wrong password, unknown email
+        at = _sign_in(_app(), email, "wrong-password")
+        _no_errors(at)
+        assert auth.SIGN_IN_FAILED in _text(at) and at.session_state["page"] == "signin"
+        flow = _flow(at)
+        error = flow[flow.index(("button", "signin_submit")) + 1][1]              # red text right under the button
+        assert 'class="auth-error" role="alert"' in error and auth.SIGN_IN_FAILED in error
+        assert "background" not in error
+
+
+def test_lockout_message_is_unchanged(env):
+    assert auth.ACCOUNT_LOCKED == "Too many attempts. Try again in 10 minutes."
+    at = _app()
+    for _ in range(auth.MAX_FAILED_ATTEMPTS - 1):
+        _sign_in(at, "vendor@example.com", "wrong-password")
+        assert auth.SIGN_IN_FAILED in _text(at)
+    _sign_in(at, "vendor@example.com", "wrong-password")
     _no_errors(at)
-    assert auth.SIGN_IN_FAILED in _text(at) and at.session_state["page"] == "signin"
+    assert auth.ACCOUNT_LOCKED in _text(at) and at.session_state["page"] == "signin"
+    _sign_in(at, "vendor@example.com", PW)                                          # locked: the right password too
+    assert auth.ACCOUNT_LOCKED in _text(at) and "user_id" not in at.session_state
+
+
+@pytest.mark.parametrize("name, email, password, confirm, message, field", [
+    ("Achieng New", "achieng@example.com", "a-long-password", "another-password", "The passwords do not match.",
+     "signup_confirm"),
+    ("Achieng New", "achieng@example.com", "short", "short", "Use at least 10 characters for the password.",
+     "signup_password"),
+    ("Achieng New", "not-an-email", "a-long-password", "a-long-password", "Enter a valid email address.", "signup_email"),
+    ("Achieng New", "vendor@example.com", "a-long-password", "a-long-password", auth.EMAIL_TAKEN, "signup_email"),
+    ("", "achieng@example.com", "a-long-password", "a-long-password", "Enter your full name.", "signup_name"),
+])
+def test_sign_up_message_is_shown_under_its_field(env, name, email, password, confirm, message, field):
+    at = _app(page="signup")
+    for key, value in (("signup_name", name), ("signup_email", email), ("signup_password", password),
+                       ("signup_confirm", confirm)):
+        at.text_input(key=key).input(value)
+    at.button(key="signup_submit").click().run()
+    _no_errors(at)
+    assert at.session_state["page"] == "signup" and "user_id" not in at.session_state
+    flow = _flow(at)
+    after = flow[flow.index(("text_input", field)) + 1]
+    assert after[0] == "markdown" and 'class="auth-error"' in after[1] and message in after[1], flow
+    assert sum('class="auth-error"' in v for _, v in flow) == 1                     # one message, in one place
 
 
 def test_lender_is_blocked_from_vendor_pages(env):
