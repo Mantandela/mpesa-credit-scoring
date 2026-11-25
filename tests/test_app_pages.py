@@ -3,15 +3,19 @@
 AppTest cannot drive the file uploader, so the end-to-end test scores the synthetic statement through the service
 (exactly what the Score screen calls) and continues in the app from the Result screen.
 """
+import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import insert
 from streamlit.proto.TextInput_pb2 import TextInput as TextInputProto
 from streamlit.testing.v1 import AppTest
 from streamlit.testing.v1.element_tree import Block
 
 import app_helpers as H
+import scoring as SC
 import toy
 from app import auth, components, db, errors, service, theme
 
@@ -137,15 +141,18 @@ def test_vendor_signs_in_and_reaches_home(env):
     _no_errors(at)
     assert at.session_state["page"] == "home" and at.session_state["user_id"] == env["vendor"]["id"]
     text = _text(at)
-    # top bar: small greeting above the first name, avatar initials that open Profile
-    assert re.search(r'<div class="tb-greet">Good (morning|afternoon|evening)</div><div class="tb-name">Wanjiku</div>', text)
+    # header: greeting with the first name; avatar initials that open Profile (phone view)
+    assert re.search(r'role="heading" aria-level="1">Good (morning|afternoon|evening), Wanjiku</div>', text)
     assert at.button(key="topbar_avatar").label == "WT"
-    # Home without a score: the hero with "--" and its button, no Business health card, no applications yet
-    assert '<div class="hero-score">--</div>' in text and "No applications yet" in text
-    assert at.button(key="cta_score").label == "Check your score"
-    assert "Business health" not in text
-    assert not [b for b in at.button if b.key.startswith(("qa_", "row_breakdown"))]   # no tiles, no breakdown row
+    # Home without a score: one friendly card with a Check score button and nothing else
+    assert at.button(key="cta_score").label == "Check score"
+    for gone in ("Business health", "Latest applications", "Top score drags", "Estimated limit", "Last check"):
+        assert gone not in text, gone
+    assert not [b for b in at.button if b.key.startswith(("head_", "row_app_", "to_reasons"))]
+    # one nav list drives both navigation styles: the tab bar (phone) and the sidebar (laptop)
     assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Score", "History", "Profile"]
+    assert [b.label for b in at.button if b.key.startswith("sidenav_")] == ["Home", "Score", "History", "Profile"]
+    assert at.button(key="side_signout").label == "Sign out" and "Wanjiku Test" in text
 
 
 RICH = toy.make_vendor(days=120, daily_in=164000 / 30)       # Low risk under the toy model: eligible up to KES 34,300
@@ -161,6 +168,32 @@ def _stored_application(env, user, result):
     return service._insert_application(env["conn"], user, lender, service.snapshot(result))
 
 
+def _score_html(result) -> str:
+    return f'<div class="sc-score">{result["score"]}<span class="sc-of">out of 850</span></div>'
+
+
+def _add_checks(env, user, base, scores):
+    """Saved checks with the given scores, one day apart, oldest first (copies of `base` with the PD and tier of each
+    score). Faster than scoring a statement once per check."""
+    t0 = datetime(2026, 11, 1, 7, 0, tzinfo=timezone.utc)
+    el = base["eligibility"]
+    with db.transaction(env["conn"]):
+        for i, s in enumerate(scores):
+            pd_ = float(SC.score_to_pd(s))
+            env["conn"].execute(insert(db.score_checks).values(
+                user_id=user["id"], created_at=t0 + timedelta(days=i), score=s, pd=pd_, tier=SC.risk_tier(pd_),
+                pillars_json=json.dumps(base["pillars"]), reasons_json=json.dumps(base["reasons"]),
+                data_notes_json=json.dumps(base["data_notes"]), request_amount=base["request_amount"],
+                request_term=base["request_term"], monthly_income=base["monthly_income"],
+                affordability_band=base["affordability_band"], rows_read=base["rows_read"],
+                max_amount=el["max_amount"], comfortable_amount=el["comfortable_amount"]))
+
+
+def _chart(text: str) -> str | None:
+    m = re.search(r'<svg role="img" aria-label="Score chart.*?</svg>', text, re.S)
+    return m.group(0) if m else None
+
+
 def test_home_with_a_score_and_applications(env):
     user, conn = env["vendor"], env["conn"]
     result = _score(env, user)
@@ -168,10 +201,14 @@ def test_home_with_a_score_and_applications(env):
     at = _app(user_id=user["id"], page="home")                  # no session result: the latest saved check is used
     _no_errors(at)
     text = _text(at)
-    assert f'<div class="hero-score">{result["score"]} <span>/ 850</span></div>' in text
-    assert "Business health" in text
-    for p in result["pillars"]:                                  # one row per area: name left, rating as coloured text
-        assert components.row(p["name"], components.status_text(p["label"])) in text
+    assert _score_html(result) in text and f"Estimated default risk {components.pct(result['pd'])}" in text
+    assert "Last check · " in text
+    assert [(b.key, b.label) for b in at.button if b.key.startswith("head_")] == [
+        ("head_score", "Check score"), ("head_apply", "Apply")]
+    assert at.button(key="to_reasons").label == "See reasons"
+    assert "Business health" in text and components.health_rows(components._pillars_in_order(result["pillars"])) in text
+    assert [p["name"] for p in components._pillars_in_order(result["pillars"])] == list(service.PILLAR_NAMES.values())
+    assert "Estimated limit" in text or "Not eligible right now" in text or "Not enough income data" in text
     rows = [b for b in at.button if b.key.startswith("row_app_")]
     assert len(rows) == 3                                        # up to 3, newest first
     assert [b.key for b in rows] == [f"row_app_{s['id']}" for s in reversed(sent)][:3]
@@ -187,7 +224,8 @@ def test_home_uses_the_session_result_when_checks_are_not_saved(env):
     assert result["check_id"] is None
     at = _app(user_id=user["id"], page="home", result=result)
     _no_errors(at)
-    assert "Business health" in _text(at) and f"{result['score']} <span>/ 850</span>" in _text(at)
+    assert "Business health" in _text(at) and _score_html(result) in _text(at)
+    assert "Score chart, one check" in _text(at)                 # the unsaved result is the chart's only point
 
 
 MENU = ["Home", "Check score", "Apply for a loan", "My applications", "Profile", "Sign out"]
@@ -310,12 +348,12 @@ def test_vendor_journey(env):
     _no_errors(at)
     text = _text(at)
     assert "simulated data" not in text and "Prototype" not in text               # no prototype line on Result
-    assert f"{result['score']} <span>/ 850</span>" in text and "Chance of default" in text
-    assert "Estimated eligibility" in text and "Up to KES 34,300" in text and "Comfortable up to KES 9,200" in text
-    assert "The lender makes the final decision." in text
+    assert _score_html(result) in text and "Estimated default risk" in text
+    assert "Estimated limit: Up to KES 34,300" in text
+    assert "Comfortable up to KES 9,200 · the lender makes the final decision" in text
     assert all(p["name"] in text for p in result["pillars"])
-    assert "Score over time" in text                                               # two saved checks
-    assert at.button(key="to_apply").label == "Apply for a loan" and at.button(key="to_reasons").label == "See reasons"
+    assert "Score chart, last 2 checks" in text                                    # two saved checks
+    assert at.button(key="to_apply").label == "Apply to a lender" and at.button(key="to_reasons").label == "See reasons"
 
     # Reasons: top reasons, and the what-if slider changes only the band (never the score or the limit)
     at.button(key="to_reasons").click().run()
@@ -324,11 +362,11 @@ def test_vendor_journey(env):
     assert at.slider(key="loan_amount").value == 9200          # starts at the comfortable amount when known
     before = _text(at)
     assert all(r["phrase"] in before for r in result["reasons"]) and "Test an amount" in before
-    assert "Up to KES 34,300" in before
+    assert "What the model weighed" in before and "Starts at your comfortable amount." in before
     at.slider(key="loan_amount").set_value(150000).run()
     _no_errors(at)
     after = _text(at)
-    assert "KES 150,000" in after and "Outside typical range" in after and "Up to KES 34,300" in after
+    assert "KES 150,000" in after and "Outside typical range" in after
     band = service.affordability_band(150000, result["monthly_income"])
     assert components.status_text(band.capitalize()) in after
     assert at.session_state["result"] == result                                    # never re-scored
@@ -340,11 +378,14 @@ def test_vendor_journey(env):
     assert sorted(radio.options) == ["Tumaini Microfinance", "Umoja SACCO"]       # organisation names are shown
     assert (at.number_input(key="apply_amount_in").value, at.number_input(key="apply_term_in").value) == \
         (9200, int(med[1]))                                    # amount prefilled with the comfortable amount
-    assert "Your estimated limit: Up to KES 34,300" in _text(at) and "Comfortable up to KES 9,200" in _text(at)
+    text = _text(at)
+    assert "Your estimated limit" in text and "Up to KES 34,300" in text and "Comfortable up to KES 9,200" in text
+    assert "Your request" in text and "The lender makes the final decision." in text
     assert len(at.get("file_uploader")) == 1
-    assert at.checkbox(key="apply_consent").label == "Share this summary with the lender"
+    assert at.checkbox(key="apply_consent").label == \
+        "Share my score summary with the lender. My statement is never shared."
     send = at.button(key="send_application")
-    assert send.label == "Check eligibility and send" and send.disabled            # needs the statement and consent
+    assert send.label == "Send application" and send.disabled                      # needs the statement and consent
     # AppTest cannot upload a file: send the way the button does, then continue on the Sent screen
     out = service.submit_application(env["conn"], user, env["lender"]["id"], H.Upload(H.statement_csv(RICH), "s.csv"),
                                      20000, 30, True)
@@ -357,17 +398,22 @@ def test_vendor_journey(env):
     text = _text(at)
     assert "Application sent" in text and "Umoja SACCO" in text and sent["ref"] in text and "Pending" in text
 
-    # History: one line per application
+    # History: the two checks and the application (a table on a laptop, expandable rows on a phone)
     at.button(key="sent_history").click().run()
     _no_errors(at)
-    assert [e.label for e in at.expander] == ["Umoja SACCO  :orange[**Pending**]"]
-    assert sent["ref"] in _text(at)
+    text = _text(at)
+    assert "2 checks · 1 application" in text and "Score checks" in text and "My applications" in text
+    assert text.count(sent["ref"]) == 2 and text.count("Umoja SACCO") >= 2                # table and row
+    assert components.status_text("Pending") in text
 
-    # Profile: a toggle is stored; delete saved results with a confirm step; sign out
+    # Profile: settings are stored by "Save changes"; delete saved results with a confirm step; sign out
     at.button(key="nav_profile").click().run()
     _no_errors(at)
-    at.toggle(key="flag_email_notifications").set_value(True).run()
-    assert auth.get_user(env["conn"], uid)["email_notifications"] == 1
+    at.toggle(key="flag_email_notifications").set_value(True)
+    assert auth.get_user(env["conn"], uid)["email_notifications"] == 0                    # not before saving
+    at.button(key="profile_save").click().run()
+    _no_errors(at)
+    assert auth.get_user(env["conn"], uid)["email_notifications"] == 1 and "Changes saved." in _text(at)
     at.button(key="delete_results").click().run()
     assert service.score_history(env["conn"], uid) != []                          # nothing deleted before confirming
     at.button(key="confirm_delete").click().run()
@@ -383,10 +429,12 @@ def test_result_for_a_very_high_risk_vendor(env):
     at = _app(user_id=env["vendor"]["id"], page="result", result=result)
     _no_errors(at)
     text = _text(at)
-    assert components.colored_text("Not eligible right now", "Very high risk") in text
-    assert "Estimated eligibility" not in text and "Up to KES" not in text
-    at.button(key="see_why").click().run()
-    assert at.session_state["page"] == "reasons" and "Not eligible right now" in _text(at)
+    assert components.colored_text("Not eligible right now", "Very high risk") in text            # red text
+    assert components.status_color("Very high risk") == "#B42318"
+    assert "Estimated limit:" not in text and "Up to KES" not in text
+    assert "Your latest score is in the Very high risk zone." in text
+    at.button(key="to_reasons").click().run()
+    assert at.session_state["page"] == "reasons" and "What the model weighed" in _text(at)
 
 
 def test_result_without_income_data(env):
@@ -429,7 +477,7 @@ def test_apply_and_reasons_with_a_very_high_result_fall_back_to_the_median(env):
     result = _score(env, env["vendor"])                        # Very high risk: no comfortable amount
     at = _app(user_id=env["vendor"]["id"], page="apply", result=result)
     _no_errors(at)
-    assert "Your estimated limit: Not eligible right now" in _text(at)
+    assert "Your estimated limit" in _text(at) and "Not eligible right now" in _text(at)
     assert at.number_input(key="apply_amount_in").value == int(service.median_request()[0])
     at = _app(user_id=env["vendor"]["id"], page="reasons", result=result)
     assert at.slider(key="loan_amount").value == int(service.median_request()[0])
@@ -442,6 +490,7 @@ SECRET = "cell JANE WANJIKU 0722987654 SELECT * FROM score_checks"
 def test_an_unexpected_error_shows_a_card_and_logs_only_class_location_and_id(env, monkeypatch, caplog):
     def boom(*a, **kw):
         raise RuntimeError(SECRET)
+    _score(env, env["vendor"])                                 # with a score, Home lists the latest applications
     monkeypatch.setattr(service, "list_applications", boom)
     caplog.set_level(logging.INFO, logger=errors.LOGGER_NAME)
     at = _app(user_id=env["vendor"]["id"], page="home")
@@ -467,7 +516,7 @@ def test_a_score_that_could_not_be_saved_is_still_shown(env):
     at = _app(user_id=env["vendor"]["id"], page="result", result=result)
     _no_errors(at)
     text = _text(at)
-    assert f"{result['score']} <span>/ 850</span>" in text and "Up to KES 34,300" in text
+    assert _score_html(result) in text and "Up to KES 34,300" in text
     assert "Could not save your result. Please try again." in text
 
 
@@ -495,8 +544,11 @@ def test_status_text_is_coloured_text_only():
     for label in ("Pending", "Approved", "Declined", "Comfortable", "Stretched", "Heavy"):
         md = components.status_md(label)
         assert "background" not in md and md.startswith(":") and "**" in md
-    assert "#FFD98A" in components.status_text("Moderate risk", on_hero=True)
-    assert components.status_color("Pending") == "#B45309" and components.status_color("High risk") == "#C2410C"
+    assert components.status_color("Pending") == "#B45309" and components.status_color("Moderate") == "#B45309"
+    for red in ("High risk", "Very high risk", "Weak", "Declined", "Raises risk", "Heavy"):
+        assert components.status_color(red) == "#B42318", red
+    for green in ("Low risk", "Good", "Strong", "Approved", "Lowers risk", "Comfortable"):
+        assert components.status_color(green) == "#067647", green
     assert ".status" not in theme.css()                                             # no CSS restyles status text
 
 
@@ -519,3 +571,144 @@ def test_no_emoji_anywhere(env, models):
     assert not EMOJI.search(rendered)
     for m in re.finditer(r'<span class="status"[^>]*>', rendered):                  # rendered status text
         assert "background" not in m.group(0)
+
+
+# ---------------------------------------------------------------- responsive pages, score chart, History
+STATES = ("none", "one", "several")
+
+
+def _vendor_with(env, state):
+    """The vendor with no saved check, one, or six (the chart shows the last five), plus one application."""
+    user = env["vendor"]
+    if state != "none":
+        base = _score(env, user, RICH)                          # one real check
+        if state == "several":
+            _add_checks(env, user, base, [560, 590, 610, 640, 670])
+        _stored_application(env, user, base)
+    return user
+
+
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("page", VENDOR_PAGES)
+def test_every_vendor_page_renders_in_the_shell(env, page, state):
+    user = _vendor_with(env, state)
+    at = _app(user_id=user["id"], page=page)
+    _no_errors(at)
+    text = _text(at)
+    # one shell: the sidebar items and the tab bar come from the same nav list
+    assert [b.key for b in at.button if b.key.startswith("sidenav_")] == [f"sidenav_{n.key}" for n in components.VENDOR_NAV]
+    assert [b.key for b in at.button if b.key.startswith("nav_")] == [f"nav_{n.key}" for n in components.VENDOR_NAV]
+    assert at.button(key="topbar_menu").label == "Menu" and 'role="heading" aria-level="1"' in text
+    assert "Notifications" not in text                                             # no notification bell
+    for gone in ("Forgot password", "Demo", "580", "simulat"):
+        assert gone.lower() not in text.lower(), gone
+    if page in ("home", "result"):
+        assert (_chart(text) is None) == (state == "none")
+        assert any(b.key == "cta_score" for b in at.button) == (state == "none")
+
+
+def test_score_chart_with_zero_one_and_five_checks(env):
+    user = env["vendor"]
+    assert _chart(_text(_app(user_id=user["id"], page="home"))) is None            # 0 checks: no chart, one card
+
+    base = _score(env, user, RICH)                                                  # 1 check: one point and the zones
+    chart = _chart(_text(_app(user_id=user["id"], page="home")))
+    assert chart and "Score chart, one check, score" in chart
+    assert chart.count("<circle") == 1 and "<polyline" not in chart
+    assert re.search(r'r="6.5" fill="#FFFFFF" stroke="#[0-9A-F]{6}"', chart)          # the latest point, outlined
+
+    _add_checks(env, user, base, [520, 556, 600, 640, 700])                        # 6 saved: the last 5 are drawn
+    chart = _chart(_text(_app(user_id=user["id"], page="home")))
+    assert chart.count("<circle") == 5 and "<polyline" in chart and "last 5 checks" in chart
+    checks = service.recent_checks(env["conn"], user["id"], 5)
+    drawn = [int(v) for v in re.findall(r'text-anchor="middle" font-size="1[14]"[^>]*>(\d{3})</text>', chart)]
+    assert drawn == [c["score"] for c in reversed(checks)]                          # oldest on the left
+    assert f'stroke="{components.status_color(checks[0]["tier"])}" stroke-width="3"' in chart
+
+
+def test_chart_zones_come_from_scoring_and_a_low_score_shows_the_high_zones():
+    bounds = components.tier_boundaries()
+    assert [b for b, _, _ in bounds] == [int(SC.pd_to_score(u)) for u, _ in SC.TIER_BANDS[:-1]]
+    names = [n for _, n in SC.TIER_BANDS]
+    assert [(a, b) for _, a, b in bounds] == list(zip(names, names[1:]))
+    # scores falling from Moderate into High and Very high: all three zone lines and their labels
+    pts = [("2026-11-01T07:00:00+00:00", 640), ("2026-11-02T07:00:00+00:00", 590), ("2026-11-03T07:00:00+00:00", 520)]
+    svg = components.score_chart(pts, "Very high risk")
+    ys = [float(v) for v in re.findall(r'<line [^>]*y1="([\d.]+)"', svg)]
+    assert len(ys) == 3 and 'stroke-dasharray="4 4"' in svg
+    assert ys == sorted(ys)                                     # 660, 598, 545 drawn top to bottom: higher is better
+    for word, color in (("Moderate", "#B45309"), ("High", "#B42318"), ("Very high", "#B42318")):
+        assert f'fill="{color}">{word}</text>' in svg, word
+    assert 'stroke="#B42318" stroke-width="3"' in svg                              # latest point in its zone colour
+    assert "down from 640 to 520" in svg and "Very high risk zone" in svg
+    # a single high score: the Low zone and the nearest line only
+    svg = components.score_chart([("2026-11-01T07:00:00+00:00", 720)], "Low risk")
+    assert len(re.findall(r"<line ", svg)) == 1 and 'fill="#067647">Low</text>' in svg and ">Very high<" not in svg
+
+
+def test_history_lists_checks_and_applications_without_file_names(env):
+    user = env["vendor"]
+    result = service.run_score_check(env["conn"], user, H.Upload(H.statement_csv(RICH), "my-shop-statement-NOV.csv"))
+    app_ = _stored_application(env, user, result)
+    at = _app(user_id=user["id"], page="history")
+    _no_errors(at)
+    text = _text(at)
+    assert "my-shop-statement" not in text and ".csv" not in text.lower()
+    assert "1 check · 1 application" in text
+    for head in ("Date", "Reference", "Score", "Risk", "Default risk", "Estimated limit",
+                 "Lender", "Request", "Status", "Lender note"):
+        assert f"<th>{head}</th>" in text, head
+    assert f"C-{100 + result['check_id']}" in text and app_["ref"] in text
+    assert components.status_text(result["tier"]) in text and components.status_text("Pending") in text
+    assert 'class="only-wide tbl-wrap"' in text and 'class="only-narrow"' in text  # table (laptop), rows (phone)
+
+
+def test_history_with_nothing_yet(env):
+    at = _app(user_id=env["vendor"]["id"], page="history")
+    _no_errors(at)
+    text = _text(at)
+    assert "0 checks · 0 applications" in text and "No score checks yet." in text and "No applications yet." in text
+    assert at.button(key="history_apply").label == "Apply to a lender"
+
+
+def test_business_health_filter_chips_keep_the_page(env):
+    user = env["vendor"]
+    result = _score(env, user, RICH)
+    at = _app(user_id=user["id"], page="result", result=result)
+    pillars = result["pillars"]
+    work = [p for p in pillars if p["label"] in ("Weak", "Fair")]
+    assert f"All ({len(pillars)})" in str(at.get("button_group")[0].proto)
+    at.session_state["health_filter"] = "work"
+    at.run()
+    _no_errors(at)
+    assert at.session_state["page"] == "result" and at.session_state["result"] == result      # page state kept
+    shown = re.findall(r'<span class="x-main">([^<]+)</span>', _text(at))
+    assert shown == [p["name"] for p in components._pillars_in_order(work)]
+
+
+def test_home_top_score_drags_and_latest_applications(env):
+    user = env["vendor"]
+    result = _score(env, user)                                  # Very high: several reasons raise risk
+    at = _app(user_id=user["id"], page="home")
+    text = _text(at)
+    drags = [r for r in result["reasons"] if r["direction"] == "Raises risk"][:3]
+    assert ("Top score drags" in text) == bool(drags)
+    for r in drags:
+        assert components.reason_row("Raises risk", r["phrase"]) in text
+    assert "No applications yet." in text and at.button(key="latest_apply").label == "Apply to a lender"
+    _stored_application(env, user, result)
+    at = _app(user_id=user["id"], page="home")
+    assert at.button(key="latest_all").label == "View all"
+    at.button(key="latest_all").click().run()
+    assert at.session_state["page"] == "history"
+
+
+def test_check_score_page_copy(env):
+    at = _app(user_id=env["vendor"]["id"], page="score")
+    _no_errors(at)
+    text = _text(at)
+    assert f"CSV, XLSX or XLS · Max {service.MAX_UPLOAD_BYTES // 2**20} MB" in text and "How to export" in text
+    assert "Open the M-Pesa Business Portal, then Statements" in text and "Select 90 to 180 days" in text
+    assert "Download as CSV or Excel" in text and components.AUTH_FOOTER in text
+    assert "pdf" not in text.lower()                            # PDFs only in the scanned-PDF error message
+    assert not at.number_input and at.button(key="get_score").label == "Get my score"

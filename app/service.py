@@ -332,10 +332,19 @@ def _check_from_row(row: dict) -> dict:
             "rows_read": row["rows_read"], "eligibility": _eligibility_from_row(row)}
 
 
+def recent_checks(conn, user_id, limit: int | None = 5) -> list:
+    """The saved checks of a vendor, newest first: at most `limit` (None = all). The one checks query of a page: Home
+    and Result take the latest 5 (the score card and its chart), History takes all of them."""
+    stmt = (select(score_checks).where(score_checks.c.user_id == user_id)
+            .order_by(score_checks.c.created_at.desc(), score_checks.c.id.desc()))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return [_check_from_row(r) for r in db.all_rows(conn, stmt)]
+
+
 def latest_check(conn, user_id) -> dict | None:
-    row = db.one(conn, select(score_checks).where(score_checks.c.user_id == user_id)
-                 .order_by(score_checks.c.created_at.desc(), score_checks.c.id.desc()).limit(1))
-    return _check_from_row(row) if row else None
+    checks = recent_checks(conn, user_id, limit=1)
+    return checks[0] if checks else None
 
 
 def score_history(conn, user_id) -> list:

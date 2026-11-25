@@ -1,58 +1,26 @@
-"""Result: score, tier, chance of default, estimated eligibility, score over time, the seven areas."""
-import altair as alt
-import pandas as pd
+"""Result: the score card (with the score chart) and the estimated limit on the left, Business health and "Apply to a
+lender" on the right (phone: stacked). The score itself comes from Check score; nothing is re-scored here."""
 import streamlit as st
 
-from app import components as ui, service, theme
-from app.pages import current_result
+from app import components as ui
+from app.pages import chart_points, checks_and_result
 
 FINAL_DECISION = "The lender makes the final decision."
 
 
-def _chart(history) -> alt.Chart:
-    df = pd.DataFrame(history, columns=["Date", "Score"])
-    df["Date"] = pd.to_datetime(df["Date"])
-    lo, hi = max(300, int(df.Score.min()) - 30), min(850, int(df.Score.max()) + 30)
-    fmt = "%H:%M" if df.Date.dt.date.nunique() == 1 else "%d %b"          # all checks on one day: show times
-    base = alt.Chart(df).encode(
-        x=alt.X("Date:T", title=None, axis=alt.Axis(format=fmt, labelColor=theme.MUTED, grid=False,
-                                                    values=df.Date.tolist(), labelOverlap="greedy")),
-        y=alt.Y("Score:Q", title=None, scale=alt.Scale(domain=[lo, hi]),
-                axis=alt.Axis(labelColor=theme.MUTED, gridColor="#EFEAFA", tickCount=4, domain=False)))
-    return (base.mark_line(color=theme.PURPLE, strokeWidth=3, interpolate="monotone")
-            + base.mark_circle(color=theme.PURPLE, size=60)).properties(height=170, background="#FFFFFF") \
-        .configure_view(strokeWidth=0)
-
-
 def render(conn, user) -> None:
-    result = current_result(conn, user)
-    ui.top_bar(user, "Your result")
+    checks, result = checks_and_result(conn, user)        # one checks query: the latest 5 (card and chart)
     if result is None:
-        ui.hero(cta=True)
+        ui.page_header(user, "Your result")
+        ui.no_score_card()
         return
-    ui.hero(result["score"], result["tier"], f"Chance of default {ui.pct(result['pd'])}")
-    if result.get("save_error"):                       # scored, but the database could not store it
+    ui.page_header(user, "Your result", ui.date_time(result["created_at"]))
+    if result.get("save_error"):                          # scored, but the database could not store it
         ui.alert(result["save_error"])
-
-    el = result["eligibility"]
-    with st.container(key="card_eligibility"):
-        if el["status"] == "eligible":
-            ui.section("Estimated eligibility")
-        ui.html(ui.eligibility_lines(el, result["tier"]))
-        if el["status"] == "eligible":
-            ui.muted(FINAL_DECISION)
-        elif el["status"] == "not_eligible":
-            st.button("See why", key="see_why", type="tertiary", on_click=ui.go, args=("reasons",))
-
-    history = service.score_history(conn, user["id"])
-    if len(history) >= 2:
-        with st.container(key="card_trend"):
-            ui.section("Score over time")
-            st.altair_chart(_chart(history), width="stretch")
-
-    with st.container(key="card_areas"):
-        ui.section("Your seven areas")
-        ui.html("".join(ui.row(p["name"], ui.status_text(p["label"]), f'<span class="num">{i}</span>')
-                        for i, p in enumerate(result["pillars"], start=1)))
-    st.button("Apply for a loan", type="primary", key="to_apply", on_click=ui.go, args=("apply",), width="stretch")
-    st.button("See reasons", key="to_reasons", on_click=ui.go, args=("reasons",), width="stretch")
+    left, right = ui.two_columns("result", "fixed")
+    with left:
+        ui.score_card(result, chart_points(checks, result))
+        ui.limit_card(result)
+    with right:
+        ui.health_card(result)
+        st.button("Apply to a lender", type="primary", key="to_apply", on_click=ui.go, args=("apply",), width="stretch")

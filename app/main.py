@@ -126,9 +126,11 @@ def _route(conn) -> None:
             ui.alert(str(e))
             st.button("Go to my home", key="go_home", on_click=ui.go, args=(signin.HOME_FOR[user["role"]],))
             return
-    render(conn, user)
-    if role == "vendor" and page in NAV_PAGES:
-        ui.bottom_nav(NAV_PAGES[page])
+    if role == "vendor":                              # the vendor shell: sidebar (laptop) or tab bar (phone)
+        with ui.shell(user, role, ui.VENDOR_NAV, NAV_PAGES.get(page), tabs=page in NAV_PAGES):
+            render(conn, user)
+    else:
+        render(conn, user)
 
 
 @st.cache_resource(show_spinner=False)
@@ -136,5 +138,5 @@ def _favicon():
     return theme.favicon()
 
 
-st.set_page_config(page_title=ui.APP_NAME, page_icon=_favicon(), layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title=ui.APP_NAME, page_icon=_favicon(), layout="wide", initial_sidebar_state="collapsed")
 st.navigation([st.Page(run, title=ui.APP_NAME, default=True)], position="hidden").run()

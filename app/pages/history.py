@@ -1,31 +1,92 @@
-"""My applications: one line per application; open a line for its details."""
+"""History: the vendor's score checks and applications. Never shows a file name (none is stored).
+
+One render: each list is drawn as a table (shown from 1024px; a wide table scrolls inside its card) and as expandable
+rows (shown below 1024px). Both are plain HTML from the same rows, so the page state is not involved."""
 from html import escape
 
 import streamlit as st
 
-from app import components as ui, service, theme
+from app import components as ui, service
+from app.pages import checks_and_result
+
+CHECK_REF_OFFSET = 100              # display reference of a saved check: "C-" + (check id + 100), like "A-" for applications
 
 
-def _md_escape(s: str) -> str:
-    return "".join("\\" + c if c in "\\`*_[]()#+-.!:|<>~$" else c for c in s)
+def check_ref(check: dict) -> str:
+    return f"C-{CHECK_REF_OFFSET + int(check['check_id'])}"
+
+
+def _limit_text(el: dict) -> str:
+    if el["status"] == "eligible":
+        return f"Up to {ui.money(el['max_amount'])}"
+    return "Not eligible" if el["status"] == "not_eligible" else "Not enough income data"
+
+
+def _table(head: list, rows: list) -> str:
+    th = "".join(f"<th>{escape(h)}</th>" for h in head)
+    body = "".join("<tr>" + "".join(r) + "</tr>" for r in rows)
+    return f'<div class="only-wide tbl-wrap"><table class="tbl"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+def _td(text: str = "", html_value: str | None = None, cls: str = "") -> str:
+    c = f' class="{cls}"' if cls else ""
+    return f"<td{c}>{html_value if html_value is not None else escape(text)}</td>"
+
+
+def _xrow(main: str, sub: str, side_html: str, details: list) -> str:
+    rows = "".join(ui.row(k, v) for k, v in details)
+    return (f'<details class="xrow"><summary><span class="x-main">{escape(main)}<span class="x-sub">{escape(sub)}</span>'
+            f'</span><span class="x-side">{side_html}</span><span class="x-chev">{ui.icon("chevron", ui.MUTED_HEX, 18)}'
+            f'</span></summary><div class="x-body">{rows}</div></details>')
+
+
+def _checks_card(checks: list) -> None:
+    with st.container(key="card_checks"):
+        ui.section("Score checks")
+        if not checks:
+            ui.muted("No score checks yet.")
+            st.button("Check score", key="history_cta", type="tertiary", on_click=ui.go, args=("score",))
+            return
+        table = _table(["Date", "Reference", "Score", "Risk", "Default risk", "Estimated limit"], [
+            [_td(ui.date_time(c["created_at"])), _td(check_ref(c)), _td(str(c["score"])),
+             _td(html_value=ui.status_text(c["tier"])), _td(ui.pct(c["pd"])), _td(_limit_text(c["eligibility"]))]
+            for c in checks])
+        rows = "".join(_xrow(ui.short_date(c["created_at"]), check_ref(c),
+                             f'<b>{c["score"]}</b>&nbsp;{ui.status_text(c["tier"])}',
+                             [("Date", escape(ui.date_time(c["created_at"]))), ("Default risk", ui.pct(c["pd"])),
+                              ("Estimated limit", escape(_limit_text(c["eligibility"])))]) for c in checks)
+        ui.html(table + f'<div class="only-narrow">{rows}</div>')
+
+
+def _apps_card(apps: list) -> None:
+    with st.container(key="card_apps"):
+        ui.section("My applications")
+        if not apps:
+            ui.muted("No applications yet.")
+            st.button("Apply to a lender", key="history_apply", type="tertiary", on_click=ui.go, args=("apply",))
+            return
+
+        def request(a):
+            return f"{ui.money(a['request']['amount'])} · {a['request']['term_days']:.0f} days"
+
+        def note(a):
+            return a["lender_note"] if a["status"] == "declined" and a["lender_note"] else ""
+
+        table = _table(["Lender", "Reference", "Date", "Request", "Status", "Lender note"], [
+            [_td(a["lender"]), _td(a["ref"]), _td(ui.short_date(a["created_at"])), _td(request(a)),
+             _td(html_value=ui.status_text(a["status"].capitalize())), _td(note(a) or "-", cls="note")]
+            for a in apps])
+        rows = "".join(_xrow(a["lender"], a["ref"], ui.status_text(a["status"].capitalize()),
+                             [("Date", ui.short_date(a["created_at"])), ("Request", escape(request(a))),
+                              ("Score", f"{a['score']} / 850")]
+                             + ([("Lender note", escape(note(a)))] if note(a) else [])) for a in apps)
+        ui.html(table + f'<div class="only-narrow">{rows}</div>')
 
 
 def render(conn, user) -> None:
-    ui.top_bar(user, "Applications", "Sent to lenders")
+    checks, _ = checks_and_result(conn, user, limit=None)          # the one checks query, all checks
     apps = service.list_applications(conn, user["id"])
-    if not apps:
-        with st.container(key="card_empty"):
-            ui.html(f'<div class="center"><div class="icon-circle lg">{ui.icon("inbox", theme.PURPLE, 28)}</div>'
-                    '<div class="section" style="margin-top:12px">No applications yet</div>'
-                    '<div class="caption" style="margin-top:4px">Check your score, then apply to a lender.</div></div>')
-            st.button("Check your score", key="history_cta", on_click=ui.go, args=("score",), width="stretch")
-        return
-    for a in apps:
-        status = a["status"].capitalize()
-        with st.expander(f"{_md_escape(a['lender'])}  {ui.status_md(status)}", key=f"app_{a['id']}"):
-            rows = (ui.row("Reference", escape(a["ref"])) + ui.row("Date", ui.short_date(a["created_at"]))
-                    + ui.row("Request", f"{ui.money(a['request']['amount'])}, {a['request']['term_days']:.0f} days")
-                    + ui.row("Score", f"{a['score']} / 850"))
-            if a["status"] == "declined" and a["lender_note"]:
-                rows += ui.row("Lender note", escape(a["lender_note"]))
-            ui.html(rows)
+    n_c, n_a = len(checks), len(apps)
+    ui.page_header(user, "History", f"{n_c} check{'s' * (n_c != 1)} · {n_a} application{'s' * (n_a != 1)}")
+    _checks_card(checks)
+    _apps_card(apps)

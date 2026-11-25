@@ -1,28 +1,26 @@
-"""Home: top bar with greeting, score hero, business health (the seven areas) and the latest applications."""
-import streamlit as st
-
+"""Home: greeting header with Check score and Apply; the score card (with the score chart), the estimated limit, the top
+score drags, Business health and the latest applications. Laptop: two columns; phone: the same blocks stacked."""
 from app import components as ui, service
-from app.pages import current_result
+from app.pages import chart_points, checks_and_result
 
 N_LATEST = 3
+ACTIONS = (("Check score", "head_score", "score", "primary"), ("Apply", "head_apply", "apply", "secondary"))
 
 
 def render(conn, user) -> None:
-    ui.top_bar(user, home=True)
-    result = current_result(conn, user)        # this session's check, else the latest saved one
+    checks, result = checks_and_result(conn, user)        # one checks query: the latest 5 (card and chart)
+    hello = f"{ui.greeting()}, {ui.first_name(user)}".rstrip(", ")
     if result is None:
-        ui.hero(cta=True)
-    else:
-        ui.hero(result["score"], result["tier"])
-        with st.container(key="card_health"):
-            ui.section("Business health")
-            ui.html("".join(ui.row(p["name"], ui.status_text(p["label"])) for p in result["pillars"]))
-
+        ui.page_header(user, hello)
+        ui.no_score_card()                                # one friendly card, nothing else
+        return
+    ui.page_header(user, hello, f"Last check · {ui.date_time(result['created_at'])}", actions=ACTIONS)
     apps = service.list_applications(conn, user["id"])[:N_LATEST]
-    with st.container(key="card_latest"):
-        ui.section("Latest applications")
-        if not apps:
-            ui.muted("No applications yet")
-        for a in apps:
-            st.button(f"{a['lender']}  {ui.status_md(a['status'].capitalize())}", key=f"row_app_{a['id']}",
-                      on_click=ui.go, args=("history",), width="stretch")
+    left, right = ui.two_columns("home", "fixed")
+    with left:
+        ui.score_card(result, chart_points(checks, result))
+        ui.limit_card(result)
+        ui.drags_card(result)
+    with right:
+        ui.health_card(result)
+        ui.latest_apps_card(apps)
