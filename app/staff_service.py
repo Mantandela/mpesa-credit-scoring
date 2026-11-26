@@ -11,20 +11,29 @@ else's". A lender sees the application snapshot the vendor shared (score summary
 name, never the statement or the vendor's other checks. Lenders only approve or decline; the decision is final.
 
 Admins. An admin sees counts, accounts (email, role, organisation of lenders, status) and the audit log as plain
-language. An admin never reads snapshots, notes, vendor names or amounts, and cannot decide applications.
+language. An admin never reads notes or vendor names on screen, and cannot decide applications or record repayments.
+The one exception is the outcomes export (export_outcomes): for future retraining it holds the snapshot score, PD,
+tier and request of loans with a recorded final outcome, and nothing that identifies a person.
+
+Repayments. A lender records what happened to a loan THEY approved: repaid on time, repaid late or defaulted (see
+docs/repayment_outcomes.md). The outcome is final: only repaying -> a final status is allowed, and a default can be
+recorded only after the due date. Every change writes an audit row; a refused attempt writes one generic audit line.
 
 Audit rows hold actions, ids and references only (never notes, amounts, names or emails).
 """
+import csv
+import io
 import json
 import math
 import secrets
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
-from sqlalchemy import Text, and_, case, cast, func, literal, select, update
+from sqlalchemy import Text, and_, case, cast, func, insert, literal, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from app import auth, db, service
-from app.db import applications, audit_log, score_checks, users
+from app.db import applications, audit_log, repayments, score_checks, users
 
 NOT_AVAILABLE = "This application is not available."
 ALREADY_DECIDED = "This application has already been decided. The decision is final."
@@ -41,17 +50,22 @@ class DecisionError(ValueError):
 # ------------------------------------------------------------------ lender
 def _snapshot_row(r: dict) -> dict:
     snap = json.loads(r["snapshot_json"])
+    rep_ = service.repayment_view(r["status"], r["decided_at"], snap["request"]["term_days"], r["repay_status"],
+                                  r["due_date"], r["recorded_at"])
+    if rep_ is not None:
+        rep_["note"] = r["repay_note"]                       # the lender's own note (escaped when shown)
     return {"id": r["id"], "ref": r["ref"], "vendor": r["vendor_name"], "status": r["status"],
             "created_at": db.iso(r["created_at"]), "decided_at": db.iso(r["decided_at"]),
             "request": snap["request"], "score": snap["score"], "tier": snap["tier"], "pd": snap["pd"],
-            "eligibility": snap["eligibility"], "snapshot": snap, "lender_note": r["lender_note"]}
+            "eligibility": snap["eligibility"], "snapshot": snap, "lender_note": r["lender_note"], "repayment": rep_}
 
 
 def _lender_select():
-    a = applications
+    a, r = applications, repayments
     return (select(a.c.id, a.c.ref, a.c.status, a.c.lender_note, a.c.created_at, a.c.decided_at, a.c.snapshot_json,
-                   users.c.name.label("vendor_name"))
-            .join_from(a, users, users.c.id == a.c.vendor_id))
+                   users.c.name.label("vendor_name"), r.c.status.label("repay_status"), r.c.due_date, r.c.recorded_at,
+                   r.c.note.label("repay_note"))
+            .join_from(a, users, users.c.id == a.c.vendor_id).outerjoin(r, r.c.application_id == a.c.id))
 
 
 def lender_applications(conn, user) -> list:
@@ -102,6 +116,80 @@ def decide_application(conn, user, app_id, decision: str, note: str | None = Non
     return lender_application(conn, user, current["id"])
 
 
+# ------------------------------------------------------------------ lender: repayments
+REPAY_REFUSED = "This outcome cannot be recorded."
+ALREADY_RECORDED = "The outcome of this loan is already recorded. It cannot be changed."
+NOT_APPROVED = "Only approved loans have a repayment to record."
+TOO_EARLY_DEFAULT = "A default can be recorded only after the due date."
+TOO_EARLY = "An outcome can be recorded only after the loan was approved."
+CHOOSE_OUTCOME = "Choose Repaid on time, Repaid late or Defaulted."
+
+
+class RepaymentError(ValueError):
+    """The outcome could not be recorded (fixed text, safe to show)."""
+
+
+def repayment_counts(apps: list) -> dict:
+    """{status: n} over the approved applications in `apps` (lender_applications rows)."""
+    out = {s: 0 for s in db.REPAYMENT_STATUSES}
+    for a in apps:
+        if a.get("repayment"):
+            out[a["repayment"]["status"]] += 1
+    return out
+
+
+def record_repayment(conn, user, app_id, status: str, note: str | None = None, now=None) -> dict:
+    """Record the final outcome of a loan THIS lender approved: repaid on time, repaid late or defaulted.
+
+    Allowed only from "repaying" (no row yet, or a row still "repaying"), so a final outcome, defaulted included, can
+    never change. Repaid on time or late: on or after the approval. Defaulted: only after the due date. One
+    transaction: the row (inserted, or updated only WHERE status = 'repaying') and its audit row (actor, reference,
+    old -> new status; never the note). Two lenders or tabs recording at once: the unique application_id makes the
+    second one fail and it is refused. Any refusal raises (RepaymentError, or AccessDenied for the wrong role or
+    organisation) and writes ONE generic audit line ("repayment_refused", the actor only). `now` (seconds since the
+    epoch) controls the clock in tests; otherwise service.CLOCK."""
+    try:
+        auth.require_role(user, "lender")
+        if status not in service.TERMINAL_STATUSES:
+            raise RepaymentError(CHOOSE_OUTCOME)
+        note = (note or "").strip() or None
+        if note is not None and len(note) > db.REPAYMENT_NOTE_MAX:
+            raise RepaymentError(f"Keep the note under {db.REPAYMENT_NOTE_MAX} characters.")
+        a = lender_application(conn, user, app_id)              # AccessDenied: another organisation's application
+        if a["status"] != "approved" or a["repayment"] is None:
+            raise RepaymentError(NOT_APPROVED)
+        current = a["repayment"]
+        if current["terminal"]:
+            raise RepaymentError(ALREADY_RECORDED)
+        t = service.now_utc(now)
+        decided = datetime.fromisoformat(a["decided_at"])
+        if t < decided:
+            raise RepaymentError(TOO_EARLY)
+        due = date.fromisoformat(current["due_date"])
+        if status == service.DEFAULTED and service.today(now) <= due:
+            raise RepaymentError(TOO_EARLY_DEFAULT)
+        r = repayments
+        try:
+            with db.transaction(conn):
+                done = conn.execute(update(r).where(r.c.application_id == a["id"], r.c.status == service.REPAYING)
+                                    .values(status=status, recorded_by=user["id"], recorded_at=t, note=note)
+                                    .returning(r.c.id)).scalar_one_or_none()
+                if done is None:
+                    conn.execute(insert(r).values(application_id=a["id"], due_date=due, status=status,
+                                                  recorded_by=user["id"], recorded_at=t, note=note, created_at=t))
+                db.audit(conn, "repayment_recorded", actor_id=user["id"], target=a["ref"],
+                         detail=f"{current['status']}->{status}", now=now)
+        except IntegrityError:                                  # recorded by someone else a moment ago
+            raise RepaymentError(ALREADY_RECORDED) from None
+    except (RepaymentError, auth.AccessDenied):
+        try:
+            db.audit(conn, "repayment_refused", actor_id=(user or {}).get("id"), now=now)
+        except service.DB_ERRORS:
+            pass
+        raise
+    return lender_application(conn, user, a["id"])
+
+
 # ------------------------------------------------------------------ admin: overview
 TIER_ORDER = ("Low risk", "Moderate risk", "High risk", "Very high risk")
 MODEL_NAMES = {"logistic": "Logistic regression", "random_forest": "Random forest", "xgboost": "XGBoost"}
@@ -127,10 +215,46 @@ def admin_overview(conn, user, now=None) -> dict:
     by_tier = {name: 0 for name in TIER_ORDER}
     for r in tiers:
         by_tier[r["tier"]] = by_tier.get(r["tier"], 0) + int(r["n"])
+    a, r = applications, repayments
+    outcome = func.coalesce(r.c.status, literal(service.REPAYING))
+    by_outcome = db.all_rows(conn, select(outcome.label("status"), func.count().label("n"))
+                             .select_from(a).outerjoin(r, r.c.application_id == a.c.id)
+                             .where(a.c.status == "approved").group_by(outcome))
+    outcomes = {s: 0 for s in db.REPAYMENT_STATUSES}
+    for row in by_outcome:
+        outcomes[row["status"]] = int(row["n"])
     stem = service.model_path().stem
     return {"scores_7d": int(counts["scores_7d"]), "applications": int(counts["applications"]),
+            "outcomes": outcomes, "outcomes_recorded": sum(outcomes[s] for s in service.TERMINAL_STATUSES),
             "decided": int(counts["decided"]), "uploads_rejected": int(counts["rejected_7d"]), "tiers_30d": by_tier,
             "model": MODEL_NAMES.get(stem, stem.replace("_", " ").capitalize()), "model_stem": stem}
+
+
+# ------------------------------------------------------------------ admin: outcomes export
+EXPORT_COLUMNS = ("application_id", "score_check_id", "snapshot_score", "snapshot_pd", "risk_tier", "requested_amount",
+                  "repay_within_days", "final_status", "recorded_date")
+
+
+def export_outcomes(conn, user, now=None) -> tuple:
+    """CSV of the loans with a FINAL recorded outcome (repaid on time, repaid late, defaulted), for future retraining:
+    exactly EXPORT_COLUMNS. Never names, emails, notes, statements or file data. Writes an audit row (the admin, the
+    row count). Returns (csv text, number of rows). Admins only."""
+    auth.require_role(user, "admin")
+    a, r = applications, repayments
+    rows = db.all_rows(conn, select(a.c.id, a.c.check_id, a.c.snapshot_json, r.c.status, r.c.recorded_at)
+                       .join_from(r, a, a.c.id == r.c.application_id)
+                       .where(r.c.status.in_(service.TERMINAL_STATUSES)).order_by(a.c.id))
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(EXPORT_COLUMNS)
+    for row in rows:
+        snap = json.loads(row["snapshot_json"])
+        w.writerow([row["id"], row["check_id"] if row["check_id"] is not None else "", int(snap["score"]),
+                    f"{float(snap['pd']):.6f}", snap["tier"], f"{float(snap['request']['amount']):.2f}",
+                    f"{float(snap['request']['term_days']):g}", row["status"],
+                    row["recorded_at"].astimezone(service.NAIROBI).date().isoformat()])
+    db.audit(conn, "outcomes_exported", actor_id=user["id"], detail=f"rows={len(rows)}", now=now)
+    return buf.getvalue(), len(rows)
 
 
 # ------------------------------------------------------------------ admin: users
@@ -240,6 +364,7 @@ def describe(action: str, target: str | None, detail: str | None, target_email: 
         "user_disabled": f"Disabled {who}",
         "user_enabled": f"Enabled {who}",
         "user_unlocked": f"Unlocked {who}",
+        "repayment_refused": "Refused a repayment record",
     }
     if action in simple:
         return simple[action]
@@ -249,6 +374,13 @@ def describe(action: str, target: str | None, detail: str | None, target_email: 
         return "Ran a score check" + (" (not saved)" if target == "not_saved" else "")
     if action == "application_refused":
         return "Application not sent: " + REFUSALS.get(detail or "", "not eligible")
+    if action == "repayment_recorded":
+        old, _, new = (detail or "").partition("->")
+        words = service.REPAYMENT_LABEL
+        return f"Recorded repayment for {ref}: {words.get(old, 'Repaying')} to {words.get(new, 'a final status')}"
+    if action == "outcomes_exported":
+        n = (detail or "").removeprefix("rows=")
+        return f"Exported repayment outcomes ({n} rows)" if n.isdigit() else "Exported repayment outcomes"
     if action == "upload_rejected":
         return "Upload rejected: " + UPLOAD_REASONS.get(detail or "", "could not be read")
     if action == "user_created":

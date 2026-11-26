@@ -85,7 +85,7 @@ def all_text(conn) -> str:
     """Every value in every table, as one string (for privacy checks). Password hashes and salts are left out: they
     are random hex and can contain digit runs that look like phone numbers."""
     out = []
-    for t in ("users", "score_checks", "applications", "audit_log"):
+    for t in ("users", "score_checks", "applications", "repayments", "audit_log"):
         for r in rows(conn, t):
             out.extend(str(v) for k, v in r.items() if k not in ("password_hash", "salt"))
     return "\n".join(out)

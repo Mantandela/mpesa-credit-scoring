@@ -22,6 +22,8 @@ import math
 import os
 import sys
 import threading
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, func, insert, select, update
@@ -36,7 +38,7 @@ import predict as P  # noqa: E402
 from pdf_statement import NoTextLayerError, PasswordError, StatementError  # noqa: E402
 
 from app import auth, db  # noqa: E402
-from app.db import applications, score_checks, users  # noqa: E402
+from app.db import applications, repayments, score_checks, users  # noqa: E402
 
 ALLOWED_EXTENSIONS = (".xlsx", ".xls", ".csv", ".pdf")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -500,16 +502,60 @@ def submit_application(conn, user, lender_id, file, amount, term, consent, filen
     return out
 
 
-def list_applications(conn, vendor_id) -> list:
-    a = applications
+# ------------------------------------------------------------------ repayments (shared rules; writes are in staff_service)
+REPAYING, ON_TIME, LATE, DEFAULTED = db.REPAYMENT_STATUSES
+TERMINAL_STATUSES = (ON_TIME, LATE, DEFAULTED)
+REPAYMENT_LABEL = {REPAYING: "Repaying", ON_TIME: "Repaid on time", LATE: "Repaid late", DEFAULTED: "Defaulted"}
+NAIROBI = timezone(timedelta(hours=3))
+CLOCK = time.time                     # the real clock; tests replace it (or pass `now`) to control "today"
+
+
+def now_utc(now: float | None = None) -> datetime:
+    """The current time (UTC), from `now` (seconds since the epoch) or CLOCK."""
+    return db.utcnow(CLOCK() if now is None else now)
+
+
+def today(now: float | None = None) -> date:
+    """Today's date in Nairobi."""
+    return now_utc(now).astimezone(NAIROBI).date()
+
+
+def due_date(decided_at: datetime | str, term_days) -> date:
+    """The due date of an approved loan: the decision date (Nairobi) plus the repay-within days of the request."""
+    d = datetime.fromisoformat(decided_at) if isinstance(decided_at, str) else decided_at
+    return d.astimezone(NAIROBI).date() + timedelta(days=math.ceil(float(term_days)))
+
+
+def repayment_view(app_status: str, decided_at, term_days, repay_status=None, stored_due=None, recorded_at=None,
+                   now: float | None = None) -> dict | None:
+    """The repayment of one application for display, or None when it is not approved. No row yet = "repaying"."""
+    if app_status != "approved" or decided_at is None:
+        return None
+    due = stored_due or due_date(decided_at, term_days)
+    if isinstance(due, str):
+        due = date.fromisoformat(due)
+    status = repay_status or REPAYING
+    return {"status": status, "label": REPAYMENT_LABEL[status], "due_date": due.isoformat(),
+            "days_left": (due - today(now)).days, "recorded_at": db.iso(recorded_at) if isinstance(recorded_at, datetime)
+            else recorded_at, "terminal": status in TERMINAL_STATUSES}
+
+
+def list_applications(conn, vendor_id, now: float | None = None) -> list:
+    """The vendor's applications, newest first (ONE query), with the repayment status and due date of approved ones.
+    Never the lender's repayment note."""
+    a, r = applications, repayments
     rows = db.all_rows(conn, select(a.c.id, a.c.ref, a.c.status, a.c.lender_note, a.c.created_at, a.c.decided_at,
-                                    a.c.snapshot_json, users.c.org_name)
-                       .join_from(a, users, users.c.id == a.c.lender_id)
+                                    a.c.snapshot_json, users.c.org_name, r.c.status.label("repay_status"),
+                                    r.c.due_date, r.c.recorded_at)
+                       .join_from(a, users, users.c.id == a.c.lender_id).outerjoin(r, r.c.application_id == a.c.id)
                        .where(a.c.vendor_id == vendor_id).order_by(a.c.created_at.desc(), a.c.id.desc()))
     out = []
-    for r in rows:
-        snap = json.loads(r["snapshot_json"])
-        out.append({"id": r["id"], "ref": r["ref"], "status": r["status"], "lender": r["org_name"],
-                    "lender_note": r["lender_note"], "created_at": db.iso(r["created_at"]), "decided_at": db.iso(r["decided_at"]),
-                    "request": snap["request"], "score": snap["score"], "tier": snap["tier"]})
+    for row in rows:
+        snap = json.loads(row["snapshot_json"])
+        out.append({"id": row["id"], "ref": row["ref"], "status": row["status"], "lender": row["org_name"],
+                    "lender_note": row["lender_note"], "created_at": db.iso(row["created_at"]),
+                    "decided_at": db.iso(row["decided_at"]), "request": snap["request"], "score": snap["score"],
+                    "tier": snap["tier"],
+                    "repayment": repayment_view(row["status"], row["decided_at"], snap["request"]["term_days"],
+                                                row["repay_status"], row["due_date"], row["recorded_at"], now)})
     return out

@@ -476,7 +476,7 @@ def test_lender_queue_and_decided_with_zero_one_and_many(penv, n):
     decided = count["approved"] + count["declined"]
     chips_of = {"lender": [f"Pending {count['pending']}", f"All {n}"],
                 "lender_decided": [f"All decided {decided}", f"Approved {count['approved']}",
-                                   f"Declined {count['declined']}"]}
+                                   f"Declined {count['declined']}", f"Awaiting outcome {count['approved']}"]}
     for page, default in (("lender", ("pending",)), ("lender_decided", ("approved", "declined"))):
         at = _app(user_id=a["id"], page=page)
         _ok(at)

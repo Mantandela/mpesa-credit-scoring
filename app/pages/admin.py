@@ -21,7 +21,10 @@ MODEL_REPORT = theme.ROOT / "docs" / "model_report.md"
 METRICS = (("Scores run (7 days)", "scores_7d", "gauge", "Last 7 days"),
            ("Applications sent", "applications", "send", "All time"),
            ("Applications decided", "decided", "check_circle", "All time"),
-           ("Uploads rejected", "uploads_rejected", "x_circle", "Last 7 days"))
+           ("Uploads rejected", "uploads_rejected", "x_circle", "Last 7 days"),
+           ("Outcomes recorded", "outcomes_recorded", "list", "Final repayment status"))
+EXPORT_LABEL = "Export outcomes (CSV)"
+EXPORT_FILE = "repayment_outcomes.csv"
 
 
 def _metric(label: str, value, icon_name: str, sub: str = "") -> str:
@@ -75,6 +78,36 @@ def render_overview(conn, user) -> None:
                     + ui.row("Test AUC", escape(test_auc(o["model_stem"]) or NOT_RECORDED))
                     + ui.row("Training data", "Trained on simulated data")
                     + ui.row("Features", str(len(features)) if features else NOT_RECORDED))
+    _outcomes_card(o, user)
+
+
+def _export_csv(user_id: int):
+    """The download's data, built only when the button is clicked (Streamlit runs it on its own thread, so it opens
+    its own connection). staff_service.export_outcomes checks the admin role again and writes the audit row."""
+    def build() -> bytes:
+        from app import db
+        conn = db.connect()
+        try:
+            text, _ = SS.export_outcomes(conn, auth.get_user(conn, user_id))
+            return text.encode("utf-8")
+        finally:
+            conn.close()
+    return build
+
+
+def _outcomes_card(o: dict, user: dict) -> None:
+    """Recorded repayment outcomes: how many, by status, and the CSV export (final outcomes only)."""
+    n = o["outcomes"]
+    with st.container(key="card_outcomes"):
+        ui.section("Repayment outcomes")
+        ui.muted("Recorded by lenders for approved loans. The export holds final outcomes only, with no names, emails "
+                 "or notes, for a future reviewed retraining. Simulated data.")
+        ui.html('<div class="rsum">' + "".join(
+            f'<div class="rsum-i"><span class="rsum-n">{n[s]}</span>{ui.pill(service.REPAYMENT_LABEL[s])}</div>'
+            for s in (service.REPAYING, service.ON_TIME, service.LATE, service.DEFAULTED)) + "</div>")
+        st.download_button(EXPORT_LABEL, data=_export_csv(user["id"]), file_name=EXPORT_FILE, mime="text/csv",
+                           key="export_outcomes", type="primary", on_click="ignore",
+                           disabled=o["outcomes_recorded"] == 0)
 
 
 def _model_files_ok() -> bool:

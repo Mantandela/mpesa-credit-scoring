@@ -2,7 +2,8 @@
 
 One render: each list is drawn as a table (shown from 900px; a wide table scrolls inside its card) and as expandable
 rows (shown below 900px). Both are plain HTML from the same rows, so the page state is not involved. Statuses and risk
-levels are pills; the lender's note is shown for every status that has one."""
+levels are pills; the lender's note is shown for every status that has one. Approved loans also show the repayment
+status the lender recorded (a pill) and the due date; the vendor can see it but never change it."""
 from html import escape
 
 import streamlit as st
@@ -73,13 +74,23 @@ def _apps_card(apps: list) -> None:
         def note(a):                                   # pending, approved or declined: shown whenever there is one
             return a["lender_note"] or ""
 
-        table = _table(["Lender", "Reference", "Date", "Request", "Status", "Lender note"], [
+        def repayment(a):
+            r = a.get("repayment")
+            if not r:
+                return "-"
+            return (f'<span class="rcell">{ui.pill(r["label"])}<span class="rdue">Due '
+                    f'{escape(ui.date_only(r["due_date"]))}</span></span>')
+
+        table = _table(["Lender", "Reference", "Date", "Request", "Status", "Repayment", "Lender note"], [
             [_td(a["lender"]), _td(a["ref"]), _td(ui.short_date(a["created_at"])), _td(request(a)),
-             _td(html_value=ui.pill(a["status"].capitalize())), _td(note(a) or "-", cls="note")]
+             _td(html_value=ui.pill(a["status"].capitalize())), _td(html_value=repayment(a)),
+             _td(note(a) or "-", cls="note")]
             for a in apps])
         rows = "".join(_xrow(a["lender"], a["ref"], ui.pill(a["status"].capitalize()),
                              [("Date", ui.short_date(a["created_at"])), ("Request", escape(request(a))),
                               ("Score", f"{a['score']} / 850")]
+                             + ([("Repayment", ui.pill(a["repayment"]["label"])),
+                                 ("Due", escape(ui.date_only(a["repayment"]["due_date"])))] if a.get("repayment") else [])
                              + ([("Lender note", escape(note(a)))] if note(a) else [])) for a in apps)
         ui.html(table + f'<div class="only-narrow">{rows}</div>')
 

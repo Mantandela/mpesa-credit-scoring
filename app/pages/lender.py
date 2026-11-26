@@ -4,9 +4,14 @@ Every screen reads through app/staff_service.py, which checks the lender role an
 addressed to this lender account only) on the server side. A lender sees the snapshot the vendor shared and the vendor's
 name, never the statement or the vendor's other checks. Lenders only approve or decline; the decision is final.
 
+Decided also tracks repayment: approved loans show their repayment status and due date, a summary card counts them,
+and while a loan is repaying "Record" opens a dialog (outcome, optional note, then a confirm step) whose choice the page
+applies on the next full run through staff_service.record_repayment, which enforces every rule server-side.
+
 Laptop: the applications table (one row per application, the reference opens the review). Phone: small cards.
 Review: two columns on a laptop (the Decision card on the right), stacked on a phone with the Decision card last.
 """
+from datetime import date
 from html import escape
 
 import streamlit as st
@@ -14,20 +19,44 @@ import streamlit as st
 from app import auth, components as ui, service, staff_service as SS, theme
 
 QUEUE_FILTERS = ("pending", "all")                                   # Queue: Pending N / All N
-DECIDED_FILTERS = ("decided", "approved", "declined")                # Decided: All decided / Approved / Declined
+DECIDED_FILTERS = ("decided", "approved", "declined", "awaiting")    # ... and Awaiting outcome (approved, repaying)
 FILTERS_FOR = {"lender": QUEUE_FILTERS, "lender_decided": DECIDED_FILTERS}
 FILTER_LABEL = {"pending": "Pending", "approved": "Approved", "declined": "Declined", "all": "All",
-                "decided": "All decided"}
+                "decided": "All decided", "awaiting": "Awaiting outcome"}
 DEFAULT_FILTER = {"lender": "pending", "lender_decided": "decided"}
 CAP_FOR = {"lender": "Queue", "lender_decided": "Decided"}
 QCOLS = ("Vendor", "Request", "Score", "Risk", "Estimated limit", "Status")
+DCOLS = ("Vendor", "Request", "Score", "Risk", "Status", "Repayment")         # the Decided table
+REPAY_OPEN, REPAY_STEP, REPAY_INTENT, REPAY_RERUN = "repay_open", "repay_step", "repay_intent", "repay_rerun"
+CANNOT_CHANGE = "This cannot be changed afterwards."
 SUMMARY_ONLY = "You see this summary only. The statement is never shared. Decisions are final."
 NOTE_LABEL = "Note to the vendor (optional)"
 INTENT = "lender_decision"                    # (application id, "approved" | "declined") set by the two buttons
 
 
-def _in(status: str, f: str) -> bool:
+def _in(a: dict, f: str) -> bool:
+    status = a["status"]
+    if f == "awaiting":
+        return bool(a.get("repayment")) and a["repayment"]["status"] == service.REPAYING
     return f == "all" or status == f or (f == "decided" and status in ("approved", "declined"))
+
+
+def _due_words(r: dict) -> str:
+    """"Due 10 Dec · 5 days left", "Due today", "Due 10 Dec · 3 days overdue"; for a recorded outcome "Recorded 12 Dec"."""
+    if r["terminal"]:
+        return f"Recorded {ui.short_date(r['recorded_at'])}" if r.get("recorded_at") else ""
+    due = date.fromisoformat(r["due_date"]).strftime("%d %b")
+    d = r["days_left"]
+    if d == 0:
+        return "Due today"
+    return f"Due {due} · {d} day{'s' * (d != 1)} left" if d > 0 else f"Due {due} · {-d} day{'s' * (d != -1)} overdue"
+
+
+def _repay_html(a: dict) -> str:
+    r = a.get("repayment")
+    if not r:
+        return '<span class="m">-</span>'
+    return f'<span class="rcell">{ui.pill(r["label"])}<span class="rdue">{escape(_due_words(r))}</span></span>'
 
 
 def _request(a: dict) -> str:
@@ -53,11 +82,22 @@ def _vendor(a: dict) -> str:
     return f'{ui.avatar(a["vendor"], "sm")}<span class="t">{escape(a["vendor"])}</span>'
 
 
-def _cells(a: dict) -> str:
-    c = (f'<span class="c">{_vendor(a)}</span><span class="c">{escape(_request(a))}</span>'
-         f'<span class="c">{a["score"]}</span><span class="c">{_risk(a)}</span>'
-         f'<span class="c">{_limit_html(a["eligibility"])}</span><span class="c">{_status(a)}</span>')
-    return f'<div class="tcells qgrid">{c}</div>'
+def _cells(a: dict, decided: bool = False) -> str:
+    head = (f'<span class="c">{_vendor(a)}</span><span class="c">{escape(_request(a))}</span>'
+            f'<span class="c">{a["score"]}</span><span class="c">{_risk(a)}</span>')
+    if decided:
+        return f'<div class="tcells dgrid">{head}<span class="c">{_status(a)}</span><span class="c">{_repay_html(a)}</span></div>'
+    return (f'<div class="tcells qgrid">{head}<span class="c">{_limit_html(a["eligibility"])}</span>'
+            f'<span class="c">{_status(a)}</span></div>')
+
+
+def _awaiting(a: dict) -> bool:
+    return bool(a.get("repayment")) and not a["repayment"]["terminal"]
+
+
+def _open_record(app_id: int) -> None:
+    st.session_state[REPAY_OPEN] = int(app_id)
+    st.session_state.pop(REPAY_STEP, None)
 
 
 def _open(page: str, app_id: int) -> None:
@@ -65,15 +105,25 @@ def _open(page: str, app_id: int) -> None:
 
 
 def _table(apps: list, page: str) -> None:
-    """Laptop: header and one row per application; the reference (indigo, bold) is the button that opens the review."""
+    """Laptop: header and one row per application; the reference (indigo, bold) is the button that opens the review.
+    On Decided, a last column holds "Record" while a loan is repaying."""
+    decided = page == "lender_decided"
     with st.container(key="qtable"):
-        head = "".join(f"<span>{escape(h)}</span>" for h in QCOLS)
-        ui.html(f'<div class="trow thead"><span class="tref">Reference</span><div class="tcells qgrid">{head}</div></div>')
+        head = "".join(f"<span>{escape(h)}</span>" for h in (DCOLS if decided else QCOLS))
+        grid = "dgrid" if decided else "qgrid"
+        ui.html(f'<div class="trow thead"><span class="tref">Reference</span><div class="tcells {grid}">{head}</div>'
+                + ('<span class="ract-h"></span>' if decided else "") + "</div>")
         for a in apps:
-            with st.container(horizontal=True, key=f"qrow_{a['id']}"):
+            with st.container(horizontal=True, key=f"qrow_{a['id']}", vertical_alignment="center"):
                 st.button(a["ref"], key=f"open_{a['id']}", type="tertiary", on_click=_open, args=(page, a["id"]),
                           help=f"Review {a['ref']}")
-                ui.html(_cells(a), width="stretch")
+                ui.html(_cells(a, decided), width="stretch")
+                if decided:
+                    if _awaiting(a):
+                        st.button("Record", key=f"rec_{a['id']}", on_click=_open_record, args=(a["id"],),
+                                  help=f"Record the repayment of {a['ref']}")
+                    else:
+                        ui.html('<span class="ract-none"></span>', width="content")
 
 
 def _list(apps: list, page: str) -> None:
@@ -85,17 +135,105 @@ def _list(apps: list, page: str) -> None:
                         f'<div class="qc-who">{_vendor(a)}</div>'
                         + ui.row("Request", escape(_request(a))) + ui.row("Score", f"{a['score']} / 850")
                         + ui.row("Risk", _risk(a)) + ui.row("Estimated limit", _limit_html(a["eligibility"]))
-                        + ui.row("Submitted", escape(ui.short_date(a["created_at"]))))
+                        + ui.row("Submitted", escape(ui.short_date(a["created_at"])))
+                        + (ui.row("Repayment", _repay_html(a)) if a.get("repayment") else ""))
                 st.button("Review application", key=f"popen_{a['id']}", on_click=_open, args=(page, a["id"]),
                           width="stretch")
+                if page == "lender_decided" and _awaiting(a):
+                    st.button("Record repayment", key=f"mrec_{a['id']}", type="primary", on_click=_open_record,
+                              args=(a["id"],), width="stretch")
+
+
+# ------------------------------------------------------------------ repayment: dialog and summary
+def _continue(app_id: int) -> None:
+    st.session_state[REPAY_STEP] = (int(app_id), st.session_state.get(f"repay_choice_{app_id}"),
+                                    st.session_state.get(f"repay_note_{app_id}") or "")
+
+
+def _back() -> None:
+    st.session_state.pop(REPAY_STEP, None)
+
+
+def _confirm(app_id: int) -> None:
+    """Confirm: only records the intent; the page applies it on the next full run with that run's connection."""
+    step = st.session_state.pop(REPAY_STEP, None)
+    if step and step[0] == int(app_id):
+        st.session_state[REPAY_INTENT] = step
+    st.session_state.pop(REPAY_OPEN, None)
+    st.session_state[REPAY_RERUN] = True
+
+
+def _dismiss() -> None:
+    for k in (REPAY_OPEN, REPAY_STEP):
+        st.session_state.pop(k, None)
+
+
+@st.dialog("Record repayment", width="small", on_dismiss=_dismiss)
+def record_dialog(a: dict) -> None:
+    """Choose the outcome (Defaulted only once the due date has passed) and an optional note, then confirm. A click in
+    a dialog reruns only the dialog, so Confirm asks for a full rerun, which applies the choice and closes it."""
+    if st.session_state.pop(REPAY_RERUN, False):
+        st.rerun()
+    r = a["repayment"]
+    ui.html(f'<div class="section">{escape(a["ref"])} · {escape(a["vendor"])}</div>'
+            f'<div class="muted">{escape(_request(a))} · {escape(_due_words(r))}</div>')
+    step = st.session_state.get(REPAY_STEP)
+    if not step or step[0] != a["id"]:
+        options = [service.ON_TIME, service.LATE] + ([service.DEFAULTED] if r["days_left"] < 0 else [])
+        st.radio("Outcome", options, format_func=service.REPAYMENT_LABEL.get, key=f"repay_choice_{a['id']}")
+        if service.DEFAULTED not in options:
+            ui.muted(f"Defaulted can be recorded after the due date ({ui.date_only(r['due_date'])}).")
+        st.text_area("Note (optional)", key=f"repay_note_{a['id']}", max_chars=300, height=90)
+        st.button("Continue", key="repay_continue", type="primary", on_click=_continue, args=(a["id"],), width="stretch")
+    else:
+        _, status, note = step
+        ui.html(f'<div class="repay-confirm">Record {ui.pill(service.REPAYMENT_LABEL[status])} for '
+                f'{escape(a["ref"])}?</div><div class="alert-text" role="alert">{ui.icon("alert", theme.DANGER, 16)}'
+                f'<span>{CANNOT_CHANGE}</span></div>'
+                + (f'<div class="note-box">{escape(note)}</div>' if note.strip() else ""))
+        with st.container(horizontal=True, key="repay_buttons"):
+            st.button("Back", key="repay_back", on_click=_back)
+            st.button("Confirm", key="repay_confirm", type="primary", on_click=_confirm, args=(a["id"],))
+
+
+def _apply_repayment(conn, user) -> tuple:
+    """Apply a confirmed outcome (staff_service checks everything again). Returns (kind, message) or None."""
+    st.session_state.pop(REPAY_RERUN, None)
+    intent = st.session_state.pop(REPAY_INTENT, None)
+    if not intent:
+        return None
+    app_id, status, note = intent
+    try:
+        a = SS.record_repayment(conn, user, app_id, status, note)
+    except SS.RepaymentError as e:
+        return ("error", str(e))
+    except auth.AccessDenied:
+        return ("error", SS.REPAY_REFUSED)
+    return ("ok", f"{a['ref']}: {a['repayment']['label']} recorded.")
+
+
+def _summary_card(apps: list, message) -> None:
+    n = SS.repayment_counts(apps)
+    items = ((service.REPAYING, "Repaying"), (service.ON_TIME, "On time"), (service.LATE, "Late"),
+             (service.DEFAULTED, "Defaulted"))
+    with st.container(key="card_rsummary"):
+        ui.html(ui.cap("Repayment outcomes") + '<div class="rsum">' + "".join(
+            f'<div class="rsum-i"><span class="rsum-n">{n[s]}</span>{ui.pill(label, ui.status_kind(service.REPAYMENT_LABEL[s]))}</div>'
+            for s, label in items) + "</div>")
+        if message:
+            kind, text = message
+            ui.alert(text) if kind == "error" else ui.html(f'<div class="ok-line" role="status">{escape(text)}</div>')
 
 
 def render_queue(conn, user, page: str = "lender") -> None:
+    message = _apply_repayment(conn, user) if page == "lender_decided" else None
     apps = SS.lender_applications(conn, user)                       # the one query of the page
     org = user.get("org_name") or user.get("name") or ""
     ui.page_header(user, "Applications", f"{org} · {CAP_FOR[page]}")
+    if page == "lender_decided":
+        _summary_card(apps, message)
     filters = FILTERS_FOR[page]
-    groups = {f: [a for a in apps if _in(a["status"], f)] for f in filters}
+    groups = {f: [a for a in apps if _in(a, f)] for f in filters}
     names = {f: f"{FILTER_LABEL[f]} {len(groups[f])}" for f in filters}
     with st.container(key="card_queue"):
         choice = st.pills("Show", filters, format_func=names.get, default=DEFAULT_FILTER[page], key=f"{page}_filter",
@@ -109,6 +247,12 @@ def render_queue(conn, user, page: str = "lender") -> None:
         else:
             _table(shown, page)
             _list(shown, page)
+    if page == "lender_decided" and st.session_state.get(REPAY_OPEN):
+        target = next((a for a in apps if a["id"] == st.session_state[REPAY_OPEN] and _awaiting(a)), None)
+        if target is not None:
+            record_dialog(target)
+        else:
+            _dismiss()
 
 
 def render_decided(conn, user) -> None:
@@ -181,6 +325,12 @@ def _decision_card(a: dict, message: str | None) -> None:
                     f'<div class="muted">Decided {escape(ui.date_time(a["decided_at"]))} · final</div></div>')
             ui.html(ui.cap("Note to the vendor")
                     + (f'<div class="note-box">{escape(note)}</div>' if note else '<div class="muted">No note.</div>'))
+            r = a.get("repayment")
+            if r:
+                ui.html(ui.cap("Repayment") + ui.row("Status", ui.pill(r["label"]))
+                        + ui.row("Due", escape(ui.date_only(r["due_date"])))
+                        + (ui.row("When", escape(_due_words(r))) if _due_words(r) else "")
+                        + (f'<div class="note-box">{escape(r["note"])}</div>' if r.get("note") else ""))
         ui.html(f'<div class="lock-line">{ui.icon("lock", theme.MUTED, 16)}<span>{escape(SUMMARY_ONLY)}</span></div>')
 
 

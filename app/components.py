@@ -37,6 +37,8 @@ STATUS_KIND = {
     "active": "good", "locked": "bad", "disabled": "neutral",
     # eligibility
     "not eligible": "bad", "not eligible right now": "bad", "not enough income data": "neutral",
+    # repayment outcomes (service.REPAYMENT_LABEL): repaying neutral purple, on time green, late yellow, defaulted red
+    "repaying": "neutral", "repaid on time": "good", "repaid late": "moderate", "defaulted": "bad",
 }
 
 
@@ -137,6 +139,12 @@ def _local(iso: str) -> datetime:
 
 def short_date(iso: str) -> str:
     return _local(iso).strftime("%d %b %Y")
+
+
+def date_only(day: str) -> str:
+    """A calendar date ("2026-12-10") as "10 Dec 2026" (no time zone: it is already a Nairobi date)."""
+    from datetime import date
+    return date.fromisoformat(day).strftime("%d %b %Y")
 
 
 def date_time(iso: str) -> str:

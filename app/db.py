@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import (Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, Table,
+from sqlalchemy import (Boolean, CheckConstraint, Column, Date, DateTime, Float, ForeignKey, Index, Integer, MetaData, Table,
                         Text, create_engine, event, false, func, inspect, insert, select, true)
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import OperationalError
@@ -117,6 +117,24 @@ applications = Table(
 Index("ix_applications_vendor_id", applications.c.vendor_id)
 Index("ix_applications_lender_id", applications.c.lender_id)
 
+# What happened to an approved loan, recorded by the lender (see docs/repayment_outcomes.md). A row is written only
+# when the outcome is recorded; until then an approved application is "repaying" (no row). One row per application.
+REPAYMENT_STATUSES = ("repaying", "repaid_on_time", "repaid_late", "defaulted")
+REPAYMENT_NOTE_MAX = 300
+repayments = Table(
+    "repayments", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("application_id", Integer, ForeignKey("applications.id"), nullable=False, unique=True),
+    Column("due_date", Date, nullable=False),                    # decision date (Nairobi) + repay-within days
+    Column("status", Text, nullable=False, server_default="repaying"),
+    Column("recorded_by", Integer, ForeignKey("users.id")),
+    Column("recorded_at", UTCDateTime()),
+    Column("note", Text),
+    Column("created_at", UTCDateTime(), nullable=False),
+    CheckConstraint("status IN ('repaying', 'repaid_on_time', 'repaid_late', 'defaulted')", name="ck_repayments_status"),
+    CheckConstraint(f"note IS NULL OR length(note) <= {REPAYMENT_NOTE_MAX}", name="ck_repayments_note"),
+)
+
 audit_log = Table(
     "audit_log", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -128,7 +146,7 @@ audit_log = Table(
 )
 Index("ix_audit_log_ts", audit_log.c.ts)
 
-TABLES = {t.name: t for t in (users, score_checks, applications, audit_log)}
+TABLES = {t.name: t for t in (users, score_checks, applications, repayments, audit_log)}
 
 
 # ------------------------------------------------------------------ settings
