@@ -1,0 +1,500 @@
+{
+  "seed": 42,
+  "note": "Evaluation only. Simulated outcomes: not real-world performance.",
+  "all_rows": 2261,
+  "test": {
+    "n": 350,
+    "vendors": 151,
+    "defaults": 62,
+    "default_rate": 0.17714285714285713
+  },
+  "train": {
+    "n": 1579,
+    "defaults": 287,
+    "default_rate": 0.181760607979734
+  },
+  "bootstrap": {
+    "resamples": 2000,
+    "stratified_by_outcome": true,
+    "interval": "percentile 95%"
+  },
+  "discrimination": {
+    "logistic": {
+      "auc": 0.7255824372759857,
+      "ci": [
+        0.6495841733870968,
+        0.7991179435483872
+      ],
+      "ks": 0.4403001792114695,
+      "gini": 0.4511648745519714,
+      "vendor_bootstrap_ci": [
+        0.638118628690252,
+        0.8081746382669314
+      ]
+    },
+    "scorecard": {
+      "auc": 0.7469758064516129,
+      "ci": [
+        0.672376232078853,
+        0.8125
+      ]
+    },
+    "random_forest": {
+      "auc": 0.7568324372759856,
+      "ci": [
+        0.6846970206093189,
+        0.821642585125448
+      ]
+    },
+    "xgboost": {
+      "auc": 0.7532482078853047,
+      "ci": [
+        0.679935315860215,
+        0.8205645161290323
+      ]
+    }
+  },
+  "paired_differences": {
+    "scorecard": {
+      "logistic_minus_model": -0.021393369175627175,
+      "ci": [
+        -0.05258736559139787,
+        0.007899305555555576
+      ],
+      "diff_ci_includes_0": true
+    },
+    "random_forest": {
+      "logistic_minus_model": -0.03124999999999989,
+      "ci": [
+        -0.07723454301075265,
+        0.011550739247311733
+      ],
+      "diff_ci_includes_0": true
+    },
+    "xgboost": {
+      "logistic_minus_model": -0.027665770609318963,
+      "ci": [
+        -0.07151657706093195,
+        0.01204217069892469
+      ],
+      "diff_ci_includes_0": true
+    }
+  },
+  "validation": {
+    "n": 332,
+    "defaults": 62,
+    "default_rate": 0.18674698795180722
+  },
+  "calibration_test": {
+    "n": 350,
+    "defaults": 62,
+    "observed_default_rate": 0.17714285714285713,
+    "mean_predicted_pd": 0.1885154128879203,
+    "brier": 0.12950481973147054,
+    "brier_reference": 0.14578458892891394,
+    "reference_pd": 0.181760607979734,
+    "brier_skill_score": 0.11167002847867258,
+    "log_loss": 0.41851893168370324,
+    "intercept": -0.2248645614924746,
+    "intercept_ci": [
+      -0.7128239568567515,
+      0.2630948338718023
+    ],
+    "slope": 0.8904129749707594,
+    "slope_ci": [
+      0.581012772165801,
+      1.199813177775718
+    ],
+    "calibration_in_the_large": -0.08832139692580593,
+    "calibration_in_the_large_ci": [
+      -0.3835229026786784,
+      0.20688010882706653
+    ],
+    "hosmer_lemeshow": {
+      "statistic": 18.219409291500085,
+      "df": 8,
+      "p_value": 0.019640370506883543
+    },
+    "ece_10_equal_count": 0.06658172463134722
+  },
+  "calibration_oof_train": {
+    "n": 1579,
+    "defaults": 287,
+    "observed_default_rate": 0.181760607979734,
+    "mean_predicted_pd": 0.18226021061865025,
+    "brier": 0.13199851193440232,
+    "brier_reference": 0.14872368936657143,
+    "reference_pd": 0.181760607979734,
+    "brier_skill_score": 0.11245805899116179,
+    "log_loss": 0.4243125807066417,
+    "intercept": -0.09900549923258323,
+    "intercept_ci": [
+      -0.34280938461206695,
+      0.1447983861469005
+    ],
+    "slope": 0.9276218777506859,
+    "slope_ci": [
+      0.7748486667787788,
+      1.080395088722593
+    ],
+    "calibration_in_the_large": -0.003837645857084673,
+    "calibration_in_the_large_ci": [
+      -0.14060732765307696,
+      0.1329320359389076
+    ],
+    "hosmer_lemeshow": {
+      "statistic": 5.8812861578459765,
+      "df": 8,
+      "p_value": 0.6605276921063729
+    },
+    "ece_10_equal_count": 0.012919490246017469
+  },
+  "calibration_validation": {
+    "n": 332,
+    "defaults": 62,
+    "observed_default_rate": 0.18674698795180722,
+    "mean_predicted_pd": 0.1772720523150725,
+    "brier": 0.12016275449920942,
+    "brier_reference": 0.15189741442796068,
+    "reference_pd": 0.181760607979734,
+    "brier_skill_score": 0.20892165971529308,
+    "log_loss": 0.39181873407140744,
+    "intercept": 0.5502479449681297,
+    "intercept_ci": [
+      -0.028070285548207674,
+      1.1285661754844671
+    ],
+    "slope": 1.361502320670522,
+    "slope_ci": [
+      0.9806480873843811,
+      1.7423565539566628
+    ],
+    "calibration_in_the_large": 0.07281767927641931,
+    "calibration_in_the_large_ci": [
+      -0.2226198735183994,
+      0.368255232071238
+    ],
+    "hosmer_lemeshow": {
+      "statistic": 9.822663155047907,
+      "df": 8,
+      "p_value": 0.2776939787360136
+    },
+    "ece_10_equal_count": 0.04912567423046398
+  },
+  "tiers_test": [
+    {
+      "tier": "Low risk",
+      "pd_band": "0% to 8%",
+      "band_low": 0.0,
+      "band_high": 0.08,
+      "n": 75,
+      "defaults": 8,
+      "mean_predicted_pd": 0.05964598044291278,
+      "observed_default_rate": 0.10666666666666667,
+      "wilson_low": 0.055049127621743174,
+      "wilson_high": 0.19661362846473074,
+      "observed_outside_band": true,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Moderate risk",
+      "pd_band": "8% to 17%",
+      "band_low": 0.08,
+      "band_high": 0.17,
+      "n": 143,
+      "defaults": 12,
+      "mean_predicted_pd": 0.1153680824920333,
+      "observed_default_rate": 0.08391608391608392,
+      "wilson_low": 0.04865396246081353,
+      "wilson_high": 0.14094820469479138,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "High risk",
+      "pd_band": "17% to 30%",
+      "band_low": 0.17,
+      "band_high": 0.3,
+      "n": 66,
+      "defaults": 15,
+      "mean_predicted_pd": 0.23059563995555704,
+      "observed_default_rate": 0.22727272727272727,
+      "wilson_low": 0.14285229563373036,
+      "wilson_high": 0.34169455364638307,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Very high risk",
+      "pd_band": "30% to 100%",
+      "band_low": 0.3,
+      "band_high": 1.0,
+      "n": 66,
+      "defaults": 27,
+      "mean_predicted_pd": 0.4513636052140322,
+      "observed_default_rate": 0.4090909090909091,
+      "wilson_low": 0.2986741800934037,
+      "wilson_high": 0.5295081029999674,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    }
+  ],
+  "tiers_oof_train": [
+    {
+      "tier": "Low risk",
+      "pd_band": "0% to 8%",
+      "band_low": 0.0,
+      "band_high": 0.08,
+      "n": 369,
+      "defaults": 28,
+      "mean_predicted_pd": 0.06032536212910415,
+      "observed_default_rate": 0.07588075880758807,
+      "wilson_low": 0.05301848964175414,
+      "wilson_high": 0.10748259575248821,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Moderate risk",
+      "pd_band": "8% to 17%",
+      "band_low": 0.08,
+      "band_high": 0.17,
+      "n": 607,
+      "defaults": 69,
+      "mean_predicted_pd": 0.11742927431941984,
+      "observed_default_rate": 0.11367380560131796,
+      "wilson_low": 0.09081475718356483,
+      "wilson_high": 0.1413919091657311,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "High risk",
+      "pd_band": "17% to 30%",
+      "band_low": 0.17,
+      "band_high": 0.3,
+      "n": 313,
+      "defaults": 71,
+      "mean_predicted_pd": 0.22781306766613735,
+      "observed_default_rate": 0.2268370607028754,
+      "wilson_low": 0.1839175712346667,
+      "wilson_high": 0.2763803309512598,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Very high risk",
+      "pd_band": "30% to 100%",
+      "band_low": 0.3,
+      "band_high": 1.0,
+      "n": 290,
+      "defaults": 119,
+      "mean_predicted_pd": 0.42394398017179474,
+      "observed_default_rate": 0.4103448275862069,
+      "wilson_low": 0.3552621374985102,
+      "wilson_high": 0.4677716841796925,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    }
+  ],
+  "tiers_validation": [
+    {
+      "tier": "Low risk",
+      "pd_band": "0% to 8%",
+      "band_low": 0.0,
+      "band_high": 0.08,
+      "n": 81,
+      "defaults": 3,
+      "mean_predicted_pd": 0.06196407192134012,
+      "observed_default_rate": 0.037037037037037035,
+      "wilson_low": 0.012675114183298107,
+      "wilson_high": 0.10332311306893818,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Moderate risk",
+      "pd_band": "8% to 17%",
+      "band_low": 0.08,
+      "band_high": 0.17,
+      "n": 130,
+      "defaults": 16,
+      "mean_predicted_pd": 0.11796419418031878,
+      "observed_default_rate": 0.12307692307692308,
+      "wilson_low": 0.07719629884646625,
+      "wilson_high": 0.1905941088231821,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "High risk",
+      "pd_band": "17% to 30%",
+      "band_low": 0.17,
+      "band_high": 0.3,
+      "n": 64,
+      "defaults": 12,
+      "mean_predicted_pd": 0.22299521390842217,
+      "observed_default_rate": 0.1875,
+      "wilson_low": 0.11064643172948806,
+      "wilson_high": 0.29974360564101526,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    },
+    {
+      "tier": "Very high risk",
+      "pd_band": "30% to 100%",
+      "band_low": 0.3,
+      "band_high": 1.0,
+      "n": 57,
+      "defaults": 31,
+      "mean_predicted_pd": 0.4250560106911416,
+      "observed_default_rate": 0.543859649122807,
+      "wilson_low": 0.41590685979119335,
+      "wilson_high": 0.6662739441690716,
+      "observed_outside_band": false,
+      "interval_misses_band": false
+    }
+  ],
+  "monotonicity_test": {
+    "rates_low_to_very_high": [
+      0.10666666666666667,
+      0.08391608391608392,
+      0.22727272727272727,
+      0.4090909090909091
+    ],
+    "observed_rate_rises_with_tier": false,
+    "empty_tiers": []
+  },
+  "monotonicity_oof_train": {
+    "rates_low_to_very_high": [
+      0.07588075880758807,
+      0.11367380560131796,
+      0.2268370607028754,
+      0.4103448275862069
+    ],
+    "observed_rate_rises_with_tier": true,
+    "empty_tiers": []
+  },
+  "monotonicity_validation": {
+    "rates_low_to_very_high": [
+      0.037037037037037035,
+      0.12307692307692308,
+      0.1875,
+      0.543859649122807
+    ],
+    "observed_rate_rises_with_tier": true,
+    "empty_tiers": []
+  },
+  "score_check": {
+    "n": 350,
+    "formula_equals_pd_to_score": true,
+    "max_abs_difference": 0,
+    "boundaries": [
+      {
+        "pd": 0.08,
+        "tier_below_pd": "Low risk",
+        "score_exact": 660.0816930584825,
+        "score_rounded": 660,
+        "first_score_always_in_lower_risk_tier": 661,
+        "rounded_score_shared_by_both_tiers": true
+      },
+      {
+        "pd": 0.17,
+        "tier_below_pd": "Moderate risk",
+        "score_exact": 598.2824247604611,
+        "score_rounded": 598,
+        "first_score_always_in_lower_risk_tier": 599,
+        "rounded_score_shared_by_both_tiers": true
+      },
+      {
+        "pd": 0.3,
+        "tier_below_pd": "High risk",
+        "score_exact": 545.0232163224542,
+        "score_rounded": 545,
+        "first_score_always_in_lower_risk_tier": 546,
+        "rounded_score_shared_by_both_tiers": true
+      }
+    ],
+    "tier_from_pd_vs_tier_from_score_disagreements": 2
+  },
+  "stability": {
+    "half_aucs": [
+      0.7650089605734767,
+      0.6845878136200718,
+      0.7553763440860215,
+      0.6881720430107526,
+      0.714605734767025,
+      0.7367831541218638,
+      0.7589605734767025,
+      0.6973566308243728,
+      0.6975806451612903,
+      0.7515681003584229
+    ],
+    "mean": 0.725,
+    "min": 0.6845878136200718,
+    "max": 0.7650089605734767,
+    "half_size": 175,
+    "defaults_per_half": 31
+  },
+  "fuliza_late": {
+    "in_deployed_model": false,
+    "share_late_test": 0.14,
+    "univariate_auc_test": 0.4933355734767024,
+    "univariate_auc_test_ci": [
+      0.4506608422939068,
+      0.5429547491039427
+    ],
+    "univariate_auc_all_rows": 0.4969080028934043,
+    "coef_train_refit": 0.012823273470354344,
+    "coef_bootstrap_ci": [
+      -0.02450800799478502,
+      0.04550660735086868
+    ],
+    "coef_ci_excludes_zero": false,
+    "coef_bootstrap_resamples": 200
+  },
+  "tier_bands": [
+    [
+      "Low risk",
+      0.0,
+      0.08
+    ],
+    [
+      "Moderate risk",
+      0.08,
+      0.17
+    ],
+    [
+      "High risk",
+      0.17,
+      0.3
+    ],
+    [
+      "Very high risk",
+      0.3,
+      1.0
+    ]
+  ],
+  "verdict": {
+    "label": "well calibrated within the uncertainty of the data",
+    "calibration_poor": false,
+    "bias": {},
+    "spread": {},
+    "hosmer_lemeshow_below_0_05": [
+      "test"
+    ],
+    "tiers_out_of_order": [
+      "test"
+    ],
+    "tier_interval_misses_band": {},
+    "test_deciles_over_predicted": [],
+    "test_deciles_under_predicted": [
+      2
+    ]
+  },
+  "figures": [
+    "reports/calibration/reliability_diagram.png",
+    "reports/calibration/tier_calibration.png",
+    "reports/calibration/auc_forest_plot.png"
+  ]
+}
