@@ -1,9 +1,11 @@
-"""Web app entry point (stage 1: vendor screens; lender and admin are stubs).
+"""Web app entry point: the vendor, lender and admin screens.
 
     streamlit run app/main.py        (from the repo root, so .streamlit/config.toml is used)
 
 Screens are routed through st.session_state["page"]; every screen declares the role it needs and the router applies
-the role guard before rendering. Prototype: all scores come from a model trained on simulated data.
+the role guard before rendering (and every lender and admin service call checks the role again, see
+app/staff_service.py). Each role has its own shell: the same frame with its own nav list. Prototype: all scores come
+from a model trained on simulated data.
 
 Database: DATABASE_URL (environment or st.secrets) selects PostgreSQL, e.g. Neon; otherwise SQLite at
 data/private/app.db. See docs/database.md.
@@ -18,7 +20,7 @@ if str(ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from app import auth, components as ui, db, errors, service, theme  # noqa: E402
-from app.pages import apply, history, home, profile, reasons, result, score, sent, signin, signup, staff  # noqa: E402
+from app.pages import admin, apply, history, home, lender, profile, reasons, result, score, sent, signin, signup  # noqa: E402
 
 # page -> (render function, role required or None for the signed-out screens)
 PAGES = {
@@ -32,11 +34,28 @@ PAGES = {
     "sent": (sent.render, "vendor"),
     "history": (history.render, "vendor"),
     "profile": (profile.render, "vendor"),
-    "lender": (staff.render_lender, "lender"),
-    "admin": (staff.render_admin, "admin"),
+    "lender": (lender.render_queue, "lender"),
+    "lender_decided": (lender.render_decided, "lender"),
+    "lender_review": (lender.render_review, "lender"),
+    "lender_profile": (lender.render_profile, "lender"),
+    "admin": (admin.render_overview, "admin"),
+    "admin_users": (admin.render_users, "admin"),
+    "admin_add": (admin.render_add_user, "admin"),
+    "admin_audit": (admin.render_audit, "admin"),
+    "admin_profile": (profile.render_account, "admin"),
 }
+# page -> the nav item shown as active; pages listed here also show the phone tab bar
 NAV_PAGES = {"home": "home", "score": "score", "result": "score", "reasons": "score", "apply": "score",
              "history": "history", "profile": "profile"}
+STAFF_NAV_PAGES = {"lender": "queue", "lender_decided": "decided", "lender_profile": "lprofile", "admin": "overview",
+                   "admin_users": "users", "admin_add": "users", "admin_audit": "audit",
+                   "admin_profile": "aprofile"}
+
+
+def _active(page: str) -> str | None:
+    if page == "lender_review":                       # the review belongs to the list it was opened from
+        return STAFF_NAV_PAGES.get(st.session_state.get("review_from") or "lender", "queue")
+    return NAV_PAGES.get(page) if page in NAV_PAGES else STAFF_NAV_PAGES.get(page)
 
 
 @st.cache_resource
@@ -122,20 +141,19 @@ def _route(conn) -> None:
         try:
             auth.require_role(user, role)
         except auth.AccessDenied as e:
-            ui.title("Not available")
-            ui.alert(str(e))
-            st.button("Go to my home", key="go_home", on_click=ui.go, args=(signin.HOME_FOR[user["role"]],))
+            ui.not_available(user, str(e))
             return
-    if role == "vendor":                              # the vendor shell: sidebar (laptop) or tab bar (phone)
-        with ui.shell(user, role, ui.VENDOR_NAV, NAV_PAGES.get(page), tabs=page in NAV_PAGES):
+        # the role's shell: sidebar (laptop) or tab bar (phone), with that role's nav list
+        with ui.shell(user, role, ui.NAV_FOR[role], _active(page), tabs=page in NAV_PAGES if role == "vendor" else True):
             render(conn, user)
     else:
         render(conn, user)
+    st.session_state["prev_page"] = page              # the page drawn last (Reasons tilts in only when it opens)
 
 
 @st.cache_resource(show_spinner=False)
 def _favicon():
-    return theme.favicon()
+    return theme.page_icon()
 
 
 st.set_page_config(page_title=ui.APP_NAME, page_icon=_favicon(), layout="wide", initial_sidebar_state="collapsed")

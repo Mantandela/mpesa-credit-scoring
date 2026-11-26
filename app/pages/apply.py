@@ -16,14 +16,14 @@ FINAL_DECISION = "The lender makes the final decision."
 def _limit_card(result) -> None:
     el = result["eligibility"]
     with st.container(key="card_limit"):
-        ui.html('<div class="muted">Your estimated limit</div>')
+        ui.html(ui.cap("Your estimated limit"))
         if el["status"] == "eligible":
             ui.html(f'<div class="limit-big">Up to {ui.money(el["max_amount"])}</div>'
                     f'<div class="muted">Comfortable up to {ui.money(el["comfortable_amount"])}</div>')
         elif el["status"] == "not_eligible":
-            ui.html(f'<div class="limit-big">{ui.colored_text("Not eligible right now", "declined")}</div>')
+            ui.html(f'<div>{ui.pill("Not eligible right now", "bad")}</div>')
         else:
-            ui.html('<div class="limit-big lc-unknown">Not enough income data</div>')
+            ui.html('<div class="limit-big">Not enough income data</div>')
 
 
 def render(conn, user) -> None:
@@ -51,7 +51,7 @@ def render(conn, user) -> None:
             names = {l["id"]: l["org_name"] for l in lenders}
             lender_id = st.radio("Lender", list(names), format_func=names.get, key="apply_lender")
     with main, st.container(key="card_request"):
-        ui.section("Your request")
+        ui.html(ui.cap("Your request"))
         amount = st.number_input("Amount (KES)", min_value=1, value=int(start_amount), step=500, key="apply_amount_in")
         term = st.number_input("Repay within (days)", min_value=1, value=int(med_term), step=1, key="apply_term_in")
         n = st.session_state.setdefault("apply_upload_n", 0)     # a new key clears the uploader after every attempt

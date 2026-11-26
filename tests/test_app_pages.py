@@ -55,12 +55,16 @@ def _app(**state) -> AppTest:
     return at.run()
 
 
+DATA_URI = re.compile(r"data:image/[a-z+]+;base64,[A-Za-z0-9+/=]+")     # the embedded logo: not screen text
+
+
 def _text(at) -> str:
-    """Everything the screen shows as text: markdown, button, widget and expander labels."""
+    """Everything the screen shows as text: markdown, button, widget and expander labels (embedded image data
+    removed, so a word search never matches inside the logo's base64)."""
     parts = [m.value for m in at.markdown if "<style>" not in m.value]
     parts += [b.label for b in at.button] + [e.label for e in at.expander]
     parts += [w.label for w in (*at.text_input, *at.number_input, *at.slider, *at.checkbox, *at.toggle, *at.radio)]
-    return "\n".join(parts)
+    return DATA_URI.sub("data:image", "\n".join(parts))
 
 
 def _no_errors(at):
@@ -84,7 +88,7 @@ def _flow(at) -> list:
                 walk(node.children[i])
         elif node.type == "markdown" and "<style>" not in node.value:
             out.append(("markdown", node.value))
-        elif node.type in ("text_input", "button"):
+        elif node.type in ("text_input", "button", "button_group"):
             out.append((node.type, node.key))
     walk(at.main)
     return out
@@ -95,9 +99,11 @@ def test_sign_in_renders(env):
     _no_errors(at)
     text = _text(at)
     assert "Welcome back" in text and "Sign in to check your score" in text
+    assert '<div class="auth-hint">Vendors, lenders and administrators sign in here.</div>' in text
+    assert "auth-pill" not in text                                                   # no account-type pill here
     assert [t.label for t in at.text_input] == ["Email", "Password"]
     assert at.text_input(key="signin_password").proto.type == TextInputProto.PASSWORD   # built-in reveal control
-    assert at.button(key="to_signup").label == "New vendor? **Create an account**"      # bold part is the purple link
+    assert at.button(key="to_signup").label == "New to Nuru? **Create an account**"     # bold part is the indigo link
     assert not [b for b in at.button if b.key.startswith(("nav_", "topbar_"))]     # no tab bar or top bar before sign in
 
 
@@ -106,6 +112,23 @@ def test_sign_up_renders(env):
     _no_errors(at)
     text = _text(at)
     assert "Create your account" in text and "Takes less than a minute" in text
+    assert "auth-pill" not in text and "auth-note" not in text                         # no pill, no staff note
+    # "Sign up as": two buttons, Vendor (chosen) and Lender, under the title and above the fields, outside the form
+    kind = at.segmented_control(key="signup_type")
+    assert kind.label == "Sign up as" and kind.value == "vendor" and not kind.proto.form_id
+    assert kind.options == ["Vendor", "Lender"]                                          # no Admin, no other type
+    flow = _flow(at)
+    title = next(i for i, (t, v) in enumerate(flow) if t == "markdown" and "auth-title" in v)
+    assert title < flow.index(("button_group", "signup_type")) < flow.index(("text_input", "signup_name"))
+    assert not at.radio and not at.selectbox and len(at.segmented_control) == 1
+    assert [t.label for t in at.text_input] == ["Full name", "Email", "Password", "Confirm password"]
+    # Lender: the Organisation name field appears (after Email), and goes away again for Vendor
+    kind.set_value("lender").run()
+    _no_errors(at)
+    assert [t.label for t in at.text_input] == ["Full name", "Email", "Organisation name", "Password",
+                                                "Confirm password"]
+    assert at.text_input(key="signup_org").proto.form_id == "signup_form"
+    at.segmented_control(key="signup_type").set_value("vendor").run()
     assert [t.label for t in at.text_input] == ["Full name", "Email", "Password", "Confirm password"]
     assert at.button(key="signup_submit").label == "Create account"
     assert at.button(key="to_signin").label == "Already have an account? **Sign in**"
@@ -131,9 +154,116 @@ def test_auth_pages_have_no_reset_link_demo_shortcut_or_old_copy(env, page):
     for gone in ("Forgot password", "Demo", "580", "simulat", "pillar"):
         assert gone.lower() not in text.lower(), gone
     assert [b.key for b in at.button] == [f"{page}_submit", "to_signup" if page == "signin" else "to_signin"]
-    # the shared band and footer
-    assert components.APP_NAME in text and "Know your credit score from your" in text
+    # the shared panel and footer: the Nuru logo (or the text "Nuru" without the file), the headline, the line
+    assert components.APP_NAME in text and components.AUTH_HEADLINE == "Credit for the vendors banks overlook"
+    assert components.AUTH_HEADLINE in text and components.AUTH_LEAD in text
     assert all(p in text for p in components.AUTH_POINTS) and components.AUTH_FOOTER in text
+
+
+@pytest.mark.parametrize("page", ["signin", "signup"])
+def test_auth_pages_have_no_tilt_and_no_preview(env, page):
+    """No rotation or perspective on the auth pages: not in their markup and not in any CSS they load."""
+    at = _app(page=page)
+    _no_errors(at)
+    everything = "\n".join(m.value for m in at.markdown)                           # including the <style> blocks
+    assert "<style>" in everything
+    for banned in ("perspective(", "rotateY(", "rotateZ(", "tilt-"):
+        assert banned not in everything, banned
+
+
+def _fill_sign_up(at, name, email, password=PW, org=None):
+    at.text_input(key="signup_name").input(name)
+    at.text_input(key="signup_email").input(email)
+    if org is not None:
+        at.text_input(key="signup_org").input(org)
+    at.text_input(key="signup_password").input(password)
+    at.text_input(key="signup_confirm").input(password)
+    return at.button(key="signup_submit").click().run()
+
+
+def test_register_functions_take_no_role():
+    import inspect
+    for fn in (service.register_vendor, service.register_lender):
+        assert "role" not in inspect.signature(fn).parameters, fn.__name__
+
+
+@pytest.mark.parametrize("forged_type", [None, "admin", "lender_admin", "ADMIN"])
+def test_forged_url_or_session_values_cannot_make_a_lender_or_admin(env, forged_type):
+    """The account type comes only from the "Sign up as" buttons: role-like session keys and query parameters are
+    ignored, and a selector value outside {vendor, lender} is dropped (Vendor is chosen again)."""
+    with pytest.raises(TypeError):
+        service.register_vendor(env["conn"], "X", "x@example.com", PW, PW, role="admin")
+    with pytest.raises(TypeError):
+        service.register_lender(env["conn"], "X", "x@example.com", "X Org", PW, PW, role="admin")
+    at = AppTest.from_file(MAIN, default_timeout=60)
+    forged = {"page": "signup", "role": "admin", "signup_role": "lender", "user_role": "admin", "account_type": "lender",
+              "org_name": "Forged SACCO"}
+    if forged_type is not None:
+        forged["signup_type"] = forged_type
+    for key, value in forged.items():
+        at.session_state[key] = value
+    at.query_params["role"] = "admin"
+    at.query_params["type"] = "lender"
+    at.query_params["signup_type"] = "admin"
+    at.run()
+    _no_errors(at)
+    assert at.segmented_control(key="signup_type").value == "vendor"
+    assert "Organisation name" not in [t.label for t in at.text_input]
+    _fill_sign_up(at, "Forged Role", "forged@example.com")
+    _no_errors(at)
+    user = auth.get_user(env["conn"], auth.find_user_id(env["conn"], "forged@example.com"))
+    assert user["role"] == "vendor" and user["org_name"] is None
+    assert at.session_state["page"] == "home" and at.session_state["user_id"] == user["id"]
+    assert '<span class="side-role">Vendor account</span>' in _text(at)
+    assert db.count(env["conn"], "users", role="admin") == 0
+
+
+def test_vendor_signs_up_then_signs_in_again(env):
+    at = _fill_sign_up(_app(page="signup"), "Achieng New", "achieng@example.com")
+    _no_errors(at)
+    user = auth.get_user(env["conn"], at.session_state["user_id"])
+    assert user["role"] == "vendor" and user["is_active"] and at.session_state["page"] == "home"
+    at.button(key="side_signout").click().run()
+    at = _sign_in(at, "achieng@example.com", PW)
+    _no_errors(at)
+    assert at.session_state["page"] == "home" and at.session_state["user_id"] == user["id"]
+
+
+def test_lender_signs_up_lands_on_the_queue_and_signs_in_again(env):
+    at = _app(page="signup")
+    at.segmented_control(key="signup_type").set_value("lender").run()
+    _fill_sign_up(at, "Imara Desk", "imara@example.com", org="  Imara   SACCO ")
+    _no_errors(at)
+    user = auth.get_user(env["conn"], auth.find_user_id(env["conn"], "imara@example.com"))
+    assert user["role"] == "lender" and user["org_name"] == "Imara SACCO" and user["is_active"]   # trimmed, active
+    assert at.session_state["page"] == "lender" and at.session_state["user_id"] == user["id"]
+    assert '<span class="side-role">Lender account</span>' in _text(at) and "Imara SACCO · Queue" in _text(at)
+    last = H.rows(env["conn"], "audit_log")[-1]
+    assert (last["action"], last["actor_id"], last["target"]) == ("lender_registered", user["id"], f"user:{user['id']}")
+    assert last["detail"] is None                                     # no password, email or organisation in the log
+    at.button(key="side_signout").click().run()
+    at = _sign_in(at, "imara@example.com", PW)
+    _no_errors(at)
+    assert at.session_state["page"] == "lender" and "No applications yet." in _text(at)
+    assert {"id": user["id"], "org_name": "Imara SACCO"} in service.list_lenders(env["conn"])   # on the Apply list
+
+
+@pytest.mark.parametrize("org, message", [
+    (" umoja   sacco ", service.ORG_TAKEN),                     # another case and spacing of an existing lender
+    ("UMOJA SACCO", service.ORG_TAKEN),
+    ("   ", service.ORG_MISSING),
+    ("X", service.ORG_LENGTH),
+])
+def test_lender_sign_up_organisation_message_is_shown_under_its_field(env, org, message):
+    at = _app(page="signup")
+    at.segmented_control(key="signup_type").set_value("lender").run()
+    _fill_sign_up(at, "Second Desk", "second@example.com", org=org)
+    _no_errors(at)
+    assert at.session_state["page"] == "signup" and "user_id" not in at.session_state
+    assert auth.find_user_id(env["conn"], "second@example.com") is None
+    flow = _flow(at)
+    after = flow[flow.index(("text_input", "signup_org")) + 1]
+    assert after[0] == "markdown" and 'class="auth-error"' in after[1] and message in after[1], flow
 
 
 def test_vendor_signs_in_and_reaches_home(env):
@@ -150,8 +280,8 @@ def test_vendor_signs_in_and_reaches_home(env):
         assert gone not in text, gone
     assert not [b for b in at.button if b.key.startswith(("head_", "row_app_", "to_reasons"))]
     # one nav list drives both navigation styles: the tab bar (phone) and the sidebar (laptop)
-    assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Score", "History", "Profile"]
-    assert [b.label for b in at.button if b.key.startswith("sidenav_")] == ["Home", "Score", "History", "Profile"]
+    assert [b.label for b in at.button if b.key.startswith("nav_")] == ["Home", "Check score", "History", "Profile"]
+    assert [b.label for b in at.button if b.key.startswith("sidenav_")] == ["Home", "Check score", "History", "Profile"]
     assert at.button(key="side_signout").label == "Sign out" and "Wanjiku Test" in text
 
 
@@ -169,7 +299,7 @@ def _stored_application(env, user, result):
 
 
 def _score_html(result) -> str:
-    return f'<div class="sc-score">{result["score"]}<span class="sc-of">out of 850</span></div>'
+    return f'<div class="hero-score">{result["score"]}<span class="hero-of">out of 850</span></div>'
 
 
 def _add_checks(env, user, base, scores):
@@ -190,7 +320,7 @@ def _add_checks(env, user, base, scores):
 
 
 def _chart(text: str) -> str | None:
-    m = re.search(r'<svg role="img" aria-label="Score chart.*?</svg>', text, re.S)
+    m = re.search(r'<div class="hero-chart"><svg role="img" aria-label="Score over time.*?</div></div>', text, re.S)
     return m.group(0) if m else None
 
 
@@ -201,21 +331,30 @@ def test_home_with_a_score_and_applications(env):
     at = _app(user_id=user["id"], page="home")                  # no session result: the latest saved check is used
     _no_errors(at)
     text = _text(at)
-    assert _score_html(result) in text and f"Estimated default risk {components.pct(result['pd'])}" in text
-    assert "Last check · " in text
-    assert [(b.key, b.label) for b in at.button if b.key.startswith("head_")] == [
-        ("head_score", "Check score"), ("head_apply", "Apply")]
-    assert at.button(key="to_reasons").label == "See reasons"
-    assert "Business health" in text and components.health_rows(components._pillars_in_order(result["pillars"])) in text
-    assert [p["name"] for p in components._pillars_in_order(result["pillars"])] == list(service.PILLAR_NAMES.values())
-    assert "Estimated limit" in text or "Not eligible right now" in text or "Not enough income data" in text
-    rows = [b for b in at.button if b.key.startswith("row_app_")]
-    assert len(rows) == 3                                        # up to 3, newest first
-    assert [b.key for b in rows] == [f"row_app_{s['id']}" for s in reversed(sent)][:3]
-    assert all(b.label == "Umoja SACCO  :orange[**Pending**]" for b in rows)
-    assert not [b for b in at.button if b.key.startswith(("qa_", "row_breakdown"))]
-    rows[0].click().run()
-    assert at.session_state["page"] == "history"                 # a row opens History
+    assert re.search(r'<div class="cap">Home</div><div class="ph-title" role="heading" aria-level="1">'
+                     r'Good (morning|afternoon|evening), Wanjiku</div>', text)
+    assert [(b.key, b.label) for b in at.button if b.key.startswith("head_")] == [("head_score", "Check score")]
+    # row 1: the hero (score, tier pill, default risk, score over time), the estimated limit and quick actions
+    assert '<div class="cap">Your score</div>' in text and _score_html(result) in text
+    assert components.pill(result["tier"], "brand") in text
+    assert f"Estimated default risk {components.pct(result['pd'])}" in text and _chart(text)
+    assert '<div class="cap">Estimated limit</div>' in text
+    assert [(b.key, b.label) for b in at.button if b.key.startswith("qa_")] == [
+        ("qa_score", "Check score"), ("qa_apply", "Apply"), ("qa_reasons", "Reasons"), ("qa_history", "History")]
+    # row 2: the seven tiles in the model's order, each with its rating pill
+    assert '<div class="cap">Your financial life</div>' in text and components.tiles(result["pillars"]) in text
+    assert re.findall(r'<div class="tile-title">([^<]+)</div>', text) == list(service.PILLAR_NAMES.values())
+    # row 3: recent activity, newest first (the 4 applications and the check: 5 rows), with pills
+    assert "Recent activity" in text and text.count('<div class="act">') == 5
+    assert text.count('<span class="pill pill-moderate">Pending</span>') == 4
+    assert f"Application to Umoja SACCO · {sent[-1]['ref']}" in text
+    for key, page in (("qa_apply", "apply"), ("qa_reasons", "reasons"), ("qa_history", "history"), ("qa_score", "score")):
+        at = _app(user_id=user["id"], page="home")
+        at.button(key=key).click().run()
+        assert at.session_state["page"] == page, key
+    at = _app(user_id=user["id"], page="home")
+    at.button(key="latest_all").click().run()
+    assert at.session_state["page"] == "history"                 # View all opens History
 
 
 def test_home_uses_the_session_result_when_checks_are_not_saved(env):
@@ -224,8 +363,8 @@ def test_home_uses_the_session_result_when_checks_are_not_saved(env):
     assert result["check_id"] is None
     at = _app(user_id=user["id"], page="home", result=result)
     _no_errors(at)
-    assert "Business health" in _text(at) and _score_html(result) in _text(at)
-    assert "Score chart, one check" in _text(at)                 # the unsaved result is the chart's only point
+    assert "Your financial life" in _text(at) and _score_html(result) in _text(at)
+    assert "Score over time, one check" in _text(at)             # the unsaved result is the chart's only point
 
 
 MENU = ["Home", "Check score", "Apply for a loan", "My applications", "Profile", "Sign out"]
@@ -307,9 +446,9 @@ def test_lender_is_blocked_from_vendor_pages(env):
         text = _text(at)
         assert "This page is for vendors only." in text, page
         assert not [b for b in at.button if b.key.startswith("nav_") or b.key in ("get_score", "send_application")]
-    at = _sign_in(_app(), "umoja@example.com", PW)                                 # a lender lands on the stub
-    assert at.session_state["page"] == "lender" and "Stage 2" in _text(at)
-    at.button(key="sign_out").click().run()
+    at = _sign_in(_app(), "umoja@example.com", PW)                                 # a lender lands on the queue
+    assert at.session_state["page"] == "lender" and "Applications" in _text(at) and "Umoja SACCO" in _text(at)
+    at.button(key="side_signout").click().run()
     assert at.session_state["page"] == "signin"
 
 
@@ -349,10 +488,10 @@ def test_vendor_journey(env):
     text = _text(at)
     assert "simulated data" not in text and "Prototype" not in text               # no prototype line on Result
     assert _score_html(result) in text and "Estimated default risk" in text
-    assert "Estimated limit: Up to KES 34,300" in text
-    assert "Comfortable up to KES 9,200 · the lender makes the final decision" in text
+    assert "Estimated limit" in text and '<div class="limit-big">Up to KES 34,300</div>' in text
+    assert "Comfortable up to KES 9,200" in text and "The lender makes the final decision." in text
     assert all(p["name"] in text for p in result["pillars"])
-    assert "Score chart, last 2 checks" in text                                    # two saved checks
+    assert "Score over time, last 2 checks" in text                                # two saved checks
     assert at.button(key="to_apply").label == "Apply to a lender" and at.button(key="to_reasons").label == "See reasons"
 
     # Reasons: top reasons, and the what-if slider changes only the band (never the score or the limit)
@@ -368,7 +507,7 @@ def test_vendor_journey(env):
     after = _text(at)
     assert "KES 150,000" in after and "Outside typical range" in after
     band = service.affordability_band(150000, result["monthly_income"])
-    assert components.status_text(band.capitalize()) in after
+    assert components.pill(band.capitalize()) in after
     assert at.session_state["result"] == result                                    # never re-scored
 
     # Apply: lender, amount and days (median request), the statement again, consent, one button
@@ -404,16 +543,14 @@ def test_vendor_journey(env):
     text = _text(at)
     assert "2 checks · 1 application" in text and "Score checks" in text and "My applications" in text
     assert text.count(sent["ref"]) == 2 and text.count("Umoja SACCO") >= 2                # table and row
-    assert components.status_text("Pending") in text
+    assert components.pill("Pending") in text and 'class="pill pill-moderate">Pending<' in text
 
-    # Profile: settings are stored by "Save changes"; delete saved results with a confirm step; sign out
+    # Profile: a toggle is stored as soon as it is switched; delete saved results with a confirm step; sign out
     at.button(key="nav_profile").click().run()
     _no_errors(at)
-    at.toggle(key="flag_email_notifications").set_value(True)
-    assert auth.get_user(env["conn"], uid)["email_notifications"] == 0                    # not before saving
-    at.button(key="profile_save").click().run()
+    at.toggle(key="flag_email_notifications").set_value(True).run()
     _no_errors(at)
-    assert auth.get_user(env["conn"], uid)["email_notifications"] == 1 and "Changes saved." in _text(at)
+    assert auth.get_user(env["conn"], uid)["email_notifications"] == 1
     at.button(key="delete_results").click().run()
     assert service.score_history(env["conn"], uid) != []                          # nothing deleted before confirming
     at.button(key="confirm_delete").click().run()
@@ -423,16 +560,35 @@ def test_vendor_journey(env):
     assert at.session_state["page"] == "signin" and "user_id" not in at.session_state
 
 
+
+def test_profile_toggles_save_when_switched_and_save_results_off_stops_storing_checks(env):
+    uid = env["vendor"]["id"]
+    _score(env, auth.get_user(env["conn"], uid))
+    before = service.score_history(env["conn"], uid)
+    assert len(before) == 1
+    at = _app(user_id=uid, page="profile")
+    _no_errors(at)
+    assert not [b for b in at.button if b.key == "profile_save"]                 # no Save changes for the toggles
+    at.toggle(key="flag_share_with_lenders").set_value(not env["vendor"]["share_with_lenders"]).run()
+    _no_errors(at)
+    assert bool(auth.get_user(env["conn"], uid)["share_with_lenders"]) != bool(env["vendor"]["share_with_lenders"])
+    at.toggle(key="flag_save_results").set_value(False).run()
+    _no_errors(at)
+    user = auth.get_user(env["conn"], uid)
+    assert user["save_results"] == 0                                             # stored without pressing anything
+    assert at.toggle(key="flag_save_results").value is False                     # and the page still shows it off
+    result = _score(env, user)                                                   # the next check is not stored
+    assert result["check_id"] is None and service.score_history(env["conn"], uid) == before
+
 def test_result_for_a_very_high_risk_vendor(env):
     result = _score(env, env["vendor"])                       # the default toy statement is Very high risk
     assert result["tier"] == "Very high risk"
     at = _app(user_id=env["vendor"]["id"], page="result", result=result)
     _no_errors(at)
     text = _text(at)
-    assert components.colored_text("Not eligible right now", "Very high risk") in text            # red text
-    assert components.status_color("Very high risk") == "#B42318"
-    assert "Estimated limit:" not in text and "Up to KES" not in text
-    assert "Your latest score is in the Very high risk zone." in text
+    assert components.pill("Not eligible right now", "bad") in text                # a red pill, black text
+    assert "Up to KES" not in text
+    assert components.pill("Very high risk", "brand") in text                       # the hero's yellow tier pill
     at.button(key="to_reasons").click().run()
     assert at.session_state["page"] == "reasons" and "What the model weighed" in _text(at)
 
@@ -536,20 +692,28 @@ def test_an_out_of_date_schema_shows_a_card_and_one_log_line(env, caplog):
 
 
 # ---------------------------------------------------------------- design rules
-def test_status_text_is_coloured_text_only():
-    for label in components.STATUS_COLORS:
-        s = components.status_text(label.title())
-        assert "color:" in s and "font-weight:700" in s and "background" not in s.lower()
-        assert re.fullmatch(r'<span class="status" style="color:#[0-9A-F]{6};font-weight:700">[^<]+</span>', s)
-    for label in ("Pending", "Approved", "Declined", "Comfortable", "Stretched", "Heavy"):
-        md = components.status_md(label)
-        assert "background" not in md and md.startswith(":") and "**" in md
-    assert components.status_color("Pending") == "#B45309" and components.status_color("Moderate") == "#B45309"
-    for red in ("High risk", "Very high risk", "Weak", "Declined", "Raises risk", "Heavy"):
-        assert components.status_color(red) == "#B42318", red
-    for green in ("Low risk", "Good", "Strong", "Approved", "Lowers risk", "Comfortable"):
-        assert components.status_color(green) == "#067647", green
-    assert ".status" not in theme.css()                                             # no CSS restyles status text
+def test_pill_has_black_text_and_the_meaning_in_its_background():
+    expected = {"Pending": "moderate", "Approved": "good", "Declined": "bad", "Raises risk": "bad", "Lowers risk": "good",
+                "Low risk": "good", "Moderate risk": "moderate", "High risk": "high", "Very high risk": "bad",
+                "Weak": "bad", "Fair": "moderate", "Good": "good", "Strong": "good", "Active": "good",
+                "Locked for 9 min": "bad", "Comfortable": "good", "Stretched": "moderate", "Heavy": "high"}
+    for label, kind in expected.items():
+        s = components.pill(label)
+        assert s == f'<span class="pill pill-{kind}">{label}</span>', label            # no inline style at all
+    assert components.pill("Very high risk", "brand") == '<span class="pill pill-brand">Very high risk</span>'
+    with pytest.raises(ValueError):
+        components.pill("x", "red")
+    css = theme.css()
+    rule = re.search(r"\.pill \{([^}]*)\}", css).group(1)
+    assert "color: #0E1226" in rule and "font-weight: 700" in rule and "height: 28px" in rule
+    backgrounds = {"good": "#BFEBCF", "moderate": "#FBE2A0", "high": "#FFD1B0", "bad": "#F8BDB6", "neutral": "#E4E1FF"}
+    for kind, bg in backgrounds.items():
+        assert re.search(rf"\.pill-{kind} \{{ background: {bg}; \}}", css), kind
+    for kind_rule in re.findall(r"\.pill-\w+ \{([^}]*)\}", css):
+        assert "color" not in kind_rule                                   # a pill kind never changes the text colour
+    # no coloured status text anywhere: the old helpers are gone
+    for gone in ("status_text", "colored_text", "status_icon_text", "status_md", "STATUS_COLORS"):
+        assert not hasattr(components, gone), gone
 
 
 def test_no_emoji_anywhere(env, models):
@@ -569,8 +733,9 @@ def test_no_emoji_anywhere(env, models):
         seen.append(_text(_app(page=page)))
     rendered = "\n".join(seen)
     assert not EMOJI.search(rendered)
-    for m in re.finditer(r'<span class="status"[^>]*>', rendered):                  # rendered status text
-        assert "background" not in m.group(0)
+    assert 'class="status"' not in rendered                                       # no coloured status text
+    for m in re.finditer(r'<span class="pill[^"]*"[^>]*>', rendered):               # pills: never an inline colour
+        assert "style=" not in m.group(0)
 
 
 # ---------------------------------------------------------------- responsive pages, score chart, History
@@ -611,39 +776,31 @@ def test_score_chart_with_zero_one_and_five_checks(env):
     user = env["vendor"]
     assert _chart(_text(_app(user_id=user["id"], page="home"))) is None            # 0 checks: no chart, one card
 
-    base = _score(env, user, RICH)                                                  # 1 check: one point and the zones
+    base = _score(env, user, RICH)                                                  # 1 check: one point
     chart = _chart(_text(_app(user_id=user["id"], page="home")))
-    assert chart and "Score chart, one check, score" in chart
+    assert chart and "Score over time, one check, score" in chart
     assert chart.count("<circle") == 1 and "<polyline" not in chart
-    assert re.search(r'r="6.5" fill="#FFFFFF" stroke="#[0-9A-F]{6}"', chart)          # the latest point, outlined
+    assert f'r="6" fill="#FFFFFF" stroke="{theme.GOLD}"' in chart                  # the latest point, outlined in yellow
 
     _add_checks(env, user, base, [520, 556, 600, 640, 700])                        # 6 saved: the last 5 are drawn
     chart = _chart(_text(_app(user_id=user["id"], page="home")))
-    assert chart.count("<circle") == 5 and "<polyline" in chart and "last 5 checks" in chart
+    assert chart.count("<circle") == 5 and f'<polyline points="' in chart and "last 5 checks" in chart
+    assert f'stroke="{theme.GOLD}" stroke-width="3"' in chart                     # the yellow line
     checks = service.recent_checks(env["conn"], user["id"], 5)
-    drawn = [int(v) for v in re.findall(r'text-anchor="middle" font-size="1[14]"[^>]*>(\d{3})</text>', chart)]
-    assert drawn == [c["score"] for c in reversed(checks)]                          # oldest on the left
-    assert f'stroke="{components.status_color(checks[0]["tier"])}" stroke-width="3"' in chart
+    drawn = [int(v) for v in re.findall(r'<div class="hero-pt"><b>(\d{3})</b>', chart)]
+    assert drawn == [c["score"] for c in reversed(checks)]                          # oldest on the left, scores under it
+    assert len(re.findall(r'<div class="hero-pt"><b>\d{3}</b><span>\d{2} \w{3}', chart)) == 5   # and their dates
 
 
-def test_chart_zones_come_from_scoring_and_a_low_score_shows_the_high_zones():
-    bounds = components.tier_boundaries()
-    assert [b for b, _, _ in bounds] == [int(SC.pd_to_score(u)) for u, _ in SC.TIER_BANDS[:-1]]
-    names = [n for _, n in SC.TIER_BANDS]
-    assert [(a, b) for _, a, b in bounds] == list(zip(names, names[1:]))
-    # scores falling from Moderate into High and Very high: all three zone lines and their labels
+def test_hero_chart_goes_up_for_a_higher_score_and_says_the_trend():
     pts = [("2026-11-01T07:00:00+00:00", 640), ("2026-11-02T07:00:00+00:00", 590), ("2026-11-03T07:00:00+00:00", 520)]
-    svg = components.score_chart(pts, "Very high risk")
-    ys = [float(v) for v in re.findall(r'<line [^>]*y1="([\d.]+)"', svg)]
-    assert len(ys) == 3 and 'stroke-dasharray="4 4"' in svg
-    assert ys == sorted(ys)                                     # 660, 598, 545 drawn top to bottom: higher is better
-    for word, color in (("Moderate", "#B45309"), ("High", "#B42318"), ("Very high", "#B42318")):
-        assert f'fill="{color}">{word}</text>' in svg, word
-    assert 'stroke="#B42318" stroke-width="3"' in svg                              # latest point in its zone colour
-    assert "down from 640 to 520" in svg and "Very high risk zone" in svg
-    # a single high score: the Low zone and the nearest line only
-    svg = components.score_chart([("2026-11-01T07:00:00+00:00", 720)], "Low risk")
-    assert len(re.findall(r"<line ", svg)) == 1 and 'fill="#067647">Low</text>' in svg and ">Very high<" not in svg
+    svg = components.hero_chart(pts)
+    ys = [float(y) for y in re.findall(r'<circle cx="[\d.]+" cy="([\d.]+)"', svg)]
+    assert ys == sorted(ys)                                     # falling scores: each point lower on the chart
+    assert "down from 640 to 520" in svg and "01 Nov" in svg and "03 Nov" in svg
+    same_day = [("2026-11-01T07:00:00+00:00", 600), ("2026-11-01T09:00:00+00:00", 610)]
+    assert "01 Nov 10:00" in components.hero_chart(same_day) and "01 Nov 12:00" in components.hero_chart(same_day)
+    assert components.hero_chart([]) == ""
 
 
 def test_history_lists_checks_and_applications_without_file_names(env):
@@ -659,7 +816,7 @@ def test_history_lists_checks_and_applications_without_file_names(env):
                  "Lender", "Request", "Status", "Lender note"):
         assert f"<th>{head}</th>" in text, head
     assert f"C-{100 + result['check_id']}" in text and app_["ref"] in text
-    assert components.status_text(result["tier"]) in text and components.status_text("Pending") in text
+    assert components.pill(result["tier"]) in text and components.pill("Pending") in text
     assert 'class="only-wide tbl-wrap"' in text and 'class="only-narrow"' in text  # table (laptop), rows (phone)
 
 
@@ -671,33 +828,33 @@ def test_history_with_nothing_yet(env):
     assert at.button(key="history_apply").label == "Apply to a lender"
 
 
-def test_business_health_filter_chips_keep_the_page(env):
+def test_business_health_tiles_in_the_model_order_with_rating_pills(env):
     user = env["vendor"]
     result = _score(env, user, RICH)
     at = _app(user_id=user["id"], page="result", result=result)
-    pillars = result["pillars"]
-    work = [p for p in pillars if p["label"] in ("Weak", "Fair")]
-    assert f"All ({len(pillars)})" in str(at.get("button_group")[0].proto)
-    at.session_state["health_filter"] = "work"
-    at.run()
     _no_errors(at)
-    assert at.session_state["page"] == "result" and at.session_state["result"] == result      # page state kept
-    shown = re.findall(r'<span class="x-main">([^<]+)</span>', _text(at))
-    assert shown == [p["name"] for p in components._pillars_in_order(work)]
-
-
-def test_home_top_score_drags_and_latest_applications(env):
-    user = env["vendor"]
-    result = _score(env, user)                                  # Very high: several reasons raise risk
-    at = _app(user_id=user["id"], page="home")
     text = _text(at)
-    drags = [r for r in result["reasons"] if r["direction"] == "Raises risk"][:3]
-    assert ("Top score drags" in text) == bool(drags)
-    for r in drags:
-        assert components.reason_row("Raises risk", r["phrase"]) in text
-    assert "No applications yet." in text and at.button(key="latest_apply").label == "Apply to a lender"
+    assert '<div class="cap">Your financial life</div>' in text
+    assert re.findall(r'<div class="tile-title">([^<]+)</div>', text) == list(service.PILLAR_NAMES.values())
+    for p in result["pillars"]:
+        assert components.pill(p["label"]) in text
+    assert not at.get("button_group")                                              # no filter chips any more
+    assert at.button(key="to_reasons").label == "See reasons"                      # the hero on Result has it
+
+
+def test_home_recent_activity_empty_and_view_all(env):
+    user = env["vendor"]
+    text = _text(_app(user_id=user["id"], page="home"))
+    assert components.EMPTY_ACTIVITY not in text                                   # no score yet: only the first card
+    user = service.update_profile_flags(env["conn"], user["id"], save_results=False)
+    result = _score(env, user)
+    at = _app(user_id=user["id"], page="home", result=result)
+    _no_errors(at)
+    text = _text(at)
+    assert components.EMPTY_ACTIVITY == "Nothing here yet. Check your score to get started."
+    assert components.EMPTY_ACTIVITY in text and not [b for b in at.button if b.key == "latest_all"]
     _stored_application(env, user, result)
-    at = _app(user_id=user["id"], page="home")
+    at = _app(user_id=user["id"], page="home", result=result)
     assert at.button(key="latest_all").label == "View all"
     at.button(key="latest_all").click().run()
     assert at.session_state["page"] == "history"
@@ -707,8 +864,22 @@ def test_check_score_page_copy(env):
     at = _app(user_id=env["vendor"]["id"], page="score")
     _no_errors(at)
     text = _text(at)
-    assert f"CSV, XLSX or XLS · Max {service.MAX_UPLOAD_BYTES // 2**20} MB" in text and "How to export" in text
+    assert "CSV, XLSX or XLS · Max 10 MB" in text and "How to export" in text
+    assert '<div class="cap">Upload statement</div>' in text
     assert "Open the M-Pesa Business Portal, then Statements" in text and "Select 90 to 180 days" in text
     assert "Download as CSV or Excel" in text and components.AUTH_FOOTER in text
     assert "pdf" not in text.lower()                            # PDFs only in the scanned-PDF error message
     assert not at.number_input and at.button(key="get_score").label == "Get my score"
+
+
+def test_business_health_rows_say_what_each_area_measures(env):
+    result = _score(env, env["vendor"])
+    at = _app(user_id=env["vendor"]["id"], page="result", result=result)
+    _no_errors(at)
+    text = _text(at)
+    for line in ("How steady your weekly income is.", "How much money you keep in your wallet from day to day.",
+                 "How much you rely on Fuliza and short-term borrowing.",
+                 "How big your debt payments are compared with your income.", "Whether bills and rent are paid on time.",
+                 "How long your history is and whether your income is growing.",
+                 "How many customers and suppliers you deal with repeatedly."):
+        assert line in text

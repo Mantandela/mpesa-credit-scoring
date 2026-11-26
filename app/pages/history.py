@@ -1,7 +1,8 @@
-"""History: the vendor's score checks and applications. Never shows a file name (none is stored).
+"""History: "My applications" and "Score checks". Never shows a file name (none is stored).
 
-One render: each list is drawn as a table (shown from 1024px; a wide table scrolls inside its card) and as expandable
-rows (shown below 1024px). Both are plain HTML from the same rows, so the page state is not involved."""
+One render: each list is drawn as a table (shown from 900px; a wide table scrolls inside its card) and as expandable
+rows (shown below 900px). Both are plain HTML from the same rows, so the page state is not involved. Statuses and risk
+levels are pills; the lender's note is shown for every status that has one."""
 from html import escape
 
 import streamlit as st
@@ -49,10 +50,10 @@ def _checks_card(checks: list) -> None:
             return
         table = _table(["Date", "Reference", "Score", "Risk", "Default risk", "Estimated limit"], [
             [_td(ui.date_time(c["created_at"])), _td(check_ref(c)), _td(str(c["score"])),
-             _td(html_value=ui.status_text(c["tier"])), _td(ui.pct(c["pd"])), _td(_limit_text(c["eligibility"]))]
+             _td(html_value=ui.pill(c["tier"])), _td(ui.pct(c["pd"])), _td(_limit_text(c["eligibility"]))]
             for c in checks])
         rows = "".join(_xrow(ui.short_date(c["created_at"]), check_ref(c),
-                             f'<b>{c["score"]}</b>&nbsp;{ui.status_text(c["tier"])}',
+                             f'<b>{c["score"]}</b>&nbsp;{ui.pill(c["tier"])}',
                              [("Date", escape(ui.date_time(c["created_at"]))), ("Default risk", ui.pct(c["pd"])),
                               ("Estimated limit", escape(_limit_text(c["eligibility"])))]) for c in checks)
         ui.html(table + f'<div class="only-narrow">{rows}</div>')
@@ -69,14 +70,14 @@ def _apps_card(apps: list) -> None:
         def request(a):
             return f"{ui.money(a['request']['amount'])} · {a['request']['term_days']:.0f} days"
 
-        def note(a):
-            return a["lender_note"] if a["status"] == "declined" and a["lender_note"] else ""
+        def note(a):                                   # pending, approved or declined: shown whenever there is one
+            return a["lender_note"] or ""
 
         table = _table(["Lender", "Reference", "Date", "Request", "Status", "Lender note"], [
             [_td(a["lender"]), _td(a["ref"]), _td(ui.short_date(a["created_at"])), _td(request(a)),
-             _td(html_value=ui.status_text(a["status"].capitalize())), _td(note(a) or "-", cls="note")]
+             _td(html_value=ui.pill(a["status"].capitalize())), _td(note(a) or "-", cls="note")]
             for a in apps])
-        rows = "".join(_xrow(a["lender"], a["ref"], ui.status_text(a["status"].capitalize()),
+        rows = "".join(_xrow(a["lender"], a["ref"], ui.pill(a["status"].capitalize()),
                              [("Date", ui.short_date(a["created_at"])), ("Request", escape(request(a))),
                               ("Score", f"{a['score']} / 850")]
                              + ([("Lender note", escape(note(a)))] if note(a) else [])) for a in apps)
@@ -88,5 +89,5 @@ def render(conn, user) -> None:
     apps = service.list_applications(conn, user["id"])
     n_c, n_a = len(checks), len(apps)
     ui.page_header(user, "History", f"{n_c} check{'s' * (n_c != 1)} · {n_a} application{'s' * (n_a != 1)}")
-    _checks_card(checks)
     _apps_card(apps)
+    _checks_card(checks)

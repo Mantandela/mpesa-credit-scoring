@@ -1,15 +1,10 @@
 [theme]
 base = "light"
-primaryColor = "#5B3FC4"
-backgroundColor = "#F5F2FC"
+primaryColor = "#3B2FC9"
+backgroundColor = "#F6F7F9"
 secondaryBackgroundColor = "#FFFFFF"
-textColor = "#1D1B3A"
+textColor = "#0E1226"
 font = "Roboto, sans-serif"
-# status words inside widget and expander labels use markdown colours; make them the exact status colours
-greenTextColor = "#067647"
-orangeTextColor = "#B45309"
-redTextColor = "#B42318"
-grayTextColor = "#6B6B85"
 
 [client]
 showSidebarNavigation = false

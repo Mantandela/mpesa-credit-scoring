@@ -1,8 +1,10 @@
-"""Building blocks shared by the pages: status text, icons, the responsive shell (sidebar, page header, tab bar), the
-score card and its chart, the estimated limit card, Business health, and the sign-in / create-account pieces.
+"""Building blocks shared by the pages: status pills, icons, the responsive shell (sidebar, page header, tab bar), the
+hero score card and its chart, the estimated limit, quick actions, the Business health tiles, recent activity, and the
+sign-in / create-account pieces.
 
-Status is always shown as bold coloured TEXT (status_text / status_md), never as a tinted background, pill or badge.
-One render per page: the same elements are laid out as a phone view or a laptop view by the CSS in theme.py.
+Status is always a PILL (pill()): black text (#0E1226), and only the background carries the meaning. No status is ever
+shown as coloured text. One render per page: the same elements are laid out as a phone view or a laptop view by the CSS
+in theme.py.
 """
 from collections import namedtuple
 from contextlib import contextmanager
@@ -13,45 +15,46 @@ import streamlit as st
 
 from app import service, theme  # noqa: F401 - service puts src/ on sys.path for scoring
 
-import scoring as SC  # noqa: E402
-
-APP_NAME = "Alama"
-GREEN, AMBER, RED, MUTED_HEX = "#067647", "#B45309", "#B42318", "#6B6B85"
-STATUS_COLORS = {
-    # applications
-    "pending": AMBER, "approved": GREEN, "declined": RED,
-    # risk tiers (with and without " risk")
-    "low": GREEN, "moderate": AMBER, "high": RED, "very high": RED,
-    "low risk": GREEN, "moderate risk": AMBER, "high risk": RED, "very high risk": RED,
-    # pillar ratings
-    "strong": GREEN, "good": GREEN, "fair": AMBER, "weak": RED,
-    # affordability
-    "comfortable": GREEN, "stretched": AMBER, "heavy": RED, "unknown": MUTED_HEX,
-    # reasons
-    "raises risk": RED, "lowers risk": GREEN,
-}
-# Streamlit markdown colour names; .streamlit/config.toml sets their text colours to exactly these hex values
-_MD_NAMES = {AMBER: "orange", GREEN: "green", RED: "red", MUTED_HEX: "gray"}
+APP_NAME = "Nuru"
+MUTED_HEX = theme.MUTED
 NAIROBI = timezone(timedelta(hours=3))
 
+# ------------------------------------------------------------------ status pills
+PILL_KINDS = ("good", "moderate", "high", "bad", "neutral", "brand")
+STATUS_KIND = {
+    # applications
+    "pending": "moderate", "approved": "good", "declined": "bad",
+    # risk tiers (with and without " risk")
+    "low": "good", "moderate": "moderate", "high": "high", "very high": "bad",
+    "low risk": "good", "moderate risk": "moderate", "high risk": "high", "very high risk": "bad",
+    # pillar ratings
+    "strong": "good", "good": "good", "fair": "moderate", "weak": "bad",
+    # affordability
+    "comfortable": "good", "stretched": "moderate", "heavy": "high", "unknown": "neutral",
+    # reasons
+    "raises risk": "bad", "lowers risk": "good",
+    # accounts
+    "active": "good", "locked": "bad", "disabled": "neutral",
+    # eligibility
+    "not eligible": "bad", "not eligible right now": "bad", "not enough income data": "neutral",
+}
 
-def status_color(label: str) -> str:
-    return STATUS_COLORS[str(label).strip().lower()]
+
+def status_kind(label: str) -> str:
+    """The pill kind (background) of a status, tier, rating, band or reason direction; "neutral" if unknown."""
+    text = str(label).strip().lower()
+    if text.startswith("locked"):
+        return "bad"
+    return STATUS_KIND.get(text, "neutral")
 
 
-def status_text(label: str) -> str:
-    """Bold coloured text for a status, tier, rating, band or reason direction. Text colour only, no background."""
-    return f'<span class="status" style="color:{status_color(label)};font-weight:700">{escape(str(label))}</span>'
-
-
-def colored_text(text: str, like: str) -> str:
-    """Any text in the colour of a status (e.g. "Not eligible right now" in red). Text colour only."""
-    return f'<span class="status" style="color:{status_color(like)};font-weight:700">{escape(str(text))}</span>'
-
-
-def status_md(label: str) -> str:
-    """The same status as Streamlit markdown (for widget and expander labels, which cannot hold HTML)."""
-    return f":{_MD_NAMES[status_color(label)]}[**{label}**]"
+def pill(text: str, kind: str | None = None) -> str:
+    """A status pill: 28px, 12px bold BLACK text (the .pill class sets #0E1226), the meaning in the background class
+    pill-<kind>. Never an inline colour."""
+    kind = kind or status_kind(text)
+    if kind not in PILL_KINDS:
+        raise ValueError(f"unknown pill kind {kind!r}")
+    return f'<span class="pill pill-{kind}">{escape(str(text))}</span>'
 
 
 def md_escape(s: str) -> str:
@@ -59,7 +62,7 @@ def md_escape(s: str) -> str:
     return "".join("\\" + c if c in "\\`*_[]()#+-.!:|<>~$" else c for c in str(s))
 
 
-def icon(name: str, color: str = theme.PURPLE, size: int = 24, label: str | None = None, stroke: float = 2) -> str:
+def icon(name: str, color: str = theme.INDIGO, size: int = 24, label: str | None = None, stroke: float = 2) -> str:
     """Inline SVG line icon. Decorative unless a label is given."""
     a11y = f'role="img" aria-label="{escape(label)}"' if label else 'aria-hidden="true"'
     return theme.svg(name, color, size, stroke).replace("<svg ", f"<svg {a11y} ", 1)
@@ -67,6 +70,11 @@ def icon(name: str, color: str = theme.PURPLE, size: int = 24, label: str | None
 
 def html(s: str, **kw) -> None:
     st.markdown(s, unsafe_allow_html=True, **kw)
+
+
+def cap(text: str) -> str:
+    """A small-caps label (11px, bold, letter-spaced, upper case): "Your score", "Quick actions", "Menu" ..."""
+    return f'<div class="cap">{escape(text)}</div>'
 
 
 def title(text: str, sub: str | None = None) -> None:
@@ -83,15 +91,36 @@ def muted(text: str) -> None:
 
 def alert(text: str) -> None:
     """An error line (red text with a small icon, no box; read out by screen readers)."""
-    html(f'<div class="alert-text" role="alert">{icon("alert", RED, 16)}<span>{escape(text)}</span></div>')
+    html(f'<div class="alert-text" role="alert">{icon("alert", theme.DANGER, 16)}<span>{escape(text)}</span></div>')
 
 
 def row(key: str, value_html: str, lead_html: str = "") -> str:
     return f'<div class="row"><span class="k">{lead_html}{escape(key)}</span><span class="v">{value_html}</span></div>'
 
 
+def avatar(name: str, cls: str = "") -> str:
+    return f'<span class="{f"avatar {cls}".strip()}" aria-hidden="true">{escape(initials(name))}</span>'
+
+
+def logo_html(width: int = 150) -> str:
+    """The Nuru logo (assets/brand/nuru-logo.png as a data URI), or the text "Nuru" when the file is missing."""
+    uri = theme.brand_uri(theme.LOGO_FILE)
+    if uri:
+        return f'<img src="{uri}" alt="{APP_NAME}" width="{width}">'
+    return f'<span class="wordmark">{APP_NAME}</span>'
+
+
+def not_available(user: dict | None, message: str) -> None:
+    """The standard "not available" state: the title, the reason and a button home. Nothing else is drawn."""
+    from app.pages.signin import HOME_FOR                      # (import here: the pages import this module)
+    title("Not available")
+    alert(message)
+    if user:
+        st.button("Go to my home", key="go_home", on_click=go, args=(HOME_FOR[user["role"]],))
+
+
 def reason_row(direction: str, phrase: str) -> str:
-    return f'<div class="reason"><span class="txt">{escape(phrase)}</span><span class="dir">{status_text(direction)}</span></div>'
+    return f'<div class="reason"><span class="txt">{escape(phrase)}</span><span class="dir">{pill(direction)}</span></div>'
 
 
 def money(x) -> str:
@@ -145,10 +174,22 @@ def sign_out() -> None:
 NavItem = namedtuple("NavItem", "key label icon page")
 VENDOR_NAV = (
     NavItem("home", "Home", "home", "home"),
-    NavItem("score", "Score", "gauge", "score"),
+    NavItem("score", "Check score", "gauge", "score"),
     NavItem("history", "History", "receipt", "history"),
     NavItem("profile", "Profile", "user", "profile"),
 )
+LENDER_NAV = (
+    NavItem("queue", "Queue", "inbox", "lender"),
+    NavItem("decided", "Decided", "check_circle", "lender_decided"),
+    NavItem("lprofile", "Profile", "user", "lender_profile"),
+)
+ADMIN_NAV = (
+    NavItem("overview", "Overview", "bars", "admin"),
+    NavItem("users", "Users", "users", "admin_users"),
+    NavItem("audit", "Audit", "clock", "admin_audit"),
+    NavItem("aprofile", "Profile", "user", "admin_profile"),
+)
+NAV_FOR = {"vendor": VENDOR_NAV, "lender": LENDER_NAV, "admin": ADMIN_NAV}
 
 MENU_ITEMS = (  # key, label, page (None = sign out); icons are in theme.MENU_ICONS
     ("home", "Home", "home"),
@@ -158,6 +199,28 @@ MENU_ITEMS = (  # key, label, page (None = sign out); icons are in theme.MENU_IC
     ("profile", "Profile", "profile"),
     ("signout", "Sign out", None),
 )
+MENU_FOR = {
+    "vendor": MENU_ITEMS,
+    "lender": tuple((n.key, n.label, n.page) for n in LENDER_NAV) + (("signout", "Sign out", None),),
+    "admin": tuple((n.key, n.label, n.page) for n in ADMIN_NAV) + (("signout", "Sign out", None),),
+}
+PROFILE_FOR = {"vendor": "profile", "lender": "lender_profile", "admin": "admin_profile"}     # the avatar button's page
+ACCOUNT_LABEL = {"vendor": "Vendor account", "lender": "Lender account", "admin": "Admin account"}
+
+
+def role_label(user: dict) -> str:
+    """The account type in the phone menu: "Vendor", "Lender · <organisation>" or "Administrator"."""
+    role = user.get("role")
+    if role == "lender":
+        return f"Lender · {user['org_name']}" if user.get("org_name") else "Lender"
+    return "Administrator" if role == "admin" else "Vendor"
+
+
+def account_label(user: dict) -> str:
+    """The line under the name in the sidebar: "<Role> account"."""
+    return ACCOUNT_LABEL.get(user.get("role"), "Vendor account")
+
+
 MENU_FLAG = "menu_navigated"
 
 
@@ -171,32 +234,37 @@ def _menu_choose(page) -> None:
 
 
 @st.dialog("Menu", width="small")
-def menu_dialog() -> None:
-    """The app menu (phone view). A click inside a dialog reruns only the dialog, so after a choice it asks for a full
-    rerun, which draws the new page and closes the dialog (main.py clears the flag on every full run)."""
+def menu_dialog(items=MENU_ITEMS, user: dict | None = None) -> None:
+    """The app menu (phone view): who is signed in and the account type, then the items of the signed-in role. A click
+    inside a dialog reruns only the dialog, so after a choice it asks for a full rerun, which draws the new page and
+    closes the dialog (main.py clears the flag on every full run)."""
     if st.session_state.pop(MENU_FLAG, False):
         st.rerun()
-    for key, label, page in MENU_ITEMS:
+    if user:
+        html(f'<div class="menu-user"><span class="menu-name">{escape(user.get("name") or "")}</span>'
+             f'<span class="menu-role">{escape(role_label(user))}</span></div>')
+    for key, label, page in items:
         st.button(label, key=f"menu_{key}", on_click=_menu_choose, args=(page,), width="stretch")
 
 
 def _sidebar(user: dict, role: str, nav, active: str | None) -> None:
-    """Laptop sidebar (hidden by CSS below 1024px): logo tile and app name, the nav items, the user and Sign out."""
+    """Laptop sidebar (hidden by CSS below 900px): the logo, "Menu", the nav pills, then the user with a sign-out icon
+    button (its visible text is hidden by CSS and stays its accessible name; the tooltip says the same)."""
     with st.container(key="shell_side"):
-        html(f'<div class="side-brand"><span class="side-logo">{icon("logo", "#FFFFFF", 20)}</span>'
-             f'<span>{escape(APP_NAME)}</span></div>')
+        html(f'<div class="side-brand">{logo_html(150)}</div><div class="cap side-menu-cap">Menu</div>')
         with st.container(key="side_nav"):
             html(f'<div class="sr-only">{escape(role.capitalize())} navigation</div>')
             for item in nav:
                 st.button(item.label, key=f"sidenav_{item.key}", on_click=go, args=(item.page,), width="stretch")
-        with st.container(key="side_user"):
-            html(f'<div class="side-user"><span class="side-avatar" aria-hidden="true">{escape(initials(user["name"]))}'
-                 f'</span><span class="side-name">{escape(user["name"])}</span></div>')
-            st.button("Sign out", key="side_signout", type="tertiary", on_click=sign_out)
+        with st.container(horizontal=True, key="side_user", vertical_alignment="center"):
+            html(f'<div class="side-user">{avatar(user["name"])}<span class="side-who"><span class="side-name">'
+                 f'{escape(user["name"])}</span><span class="side-role">{escape(account_label(user))}</span></span></div>',
+                 width="stretch")
+            st.button("Sign out", key="side_signout", on_click=sign_out, help="Sign out")
 
 
 def bottom_nav(nav, active: str | None) -> None:
-    """Phone tab bar, fixed to the bottom of the screen (hidden by CSS from 1024px)."""
+    """Phone tab bar, fixed to the bottom of the screen (hidden by CSS from 900px)."""
     with st.container(horizontal=True, key="bottom_nav"):
         for item in nav:
             st.button(item.label, key=f"nav_{item.key}", on_click=go, args=(item.page,), width="stretch")
@@ -205,8 +273,7 @@ def bottom_nav(nav, active: str | None) -> None:
 @contextmanager
 def shell(user: dict, role: str, nav, active: str | None, tabs: bool = True):
     """The app frame around one page: the laptop sidebar, the content area, and the phone tab bar. `nav` is a list of
-    NavItem (the same list drives both navigation styles), `active` the key of the current item. Reusable for the
-    lender and admin shells with their own nav lists."""
+    NavItem (the same list drives both navigation styles), `active` the key of the current item."""
     html(theme.nav_css(nav, active))
     _sidebar(user, role, nav, active)
     with st.container(key="shell_main"):
@@ -216,17 +283,20 @@ def shell(user: dict, role: str, nav, active: str | None, tabs: bool = True):
 
 
 def page_header(user: dict, title_text: str, sub: str | None = None, actions=()) -> None:
-    """Page header. Phone: menu button, title, avatar (actions on a line below). Laptop: small grey subtitle above the
-    26px title, actions on the right (menu and avatar hidden: the sidebar has them).
+    """Page header: a small-caps line (`sub`) above the title (Outfit 600, 40px on a laptop, 30px under 900px), actions
+    on the right. Phone: menu button and avatar around the title (the sidebar has them on a laptop).
     actions: (label, key, page, "primary" | "secondary")."""
     with st.container(horizontal=True, key="page_head", vertical_alignment="center", gap="small"):
         # a real button: its visible label is hidden by CSS but stays its accessible name, "Menu"
-        if st.button("Menu", key="topbar_menu", width="content"):
-            menu_dialog()
-        sub_html = f'<div class="ph-sub">{escape(sub)}</div>' if sub else ""
-        html(f'<div class="ph-text">{sub_html}<div class="ph-title" role="heading" aria-level="1">'
+        role = user.get("role", "vendor")
+        if st.button("Menu", key="topbar_menu", width="content", help="Menu"):
+            menu_dialog(MENU_FOR.get(role, MENU_ITEMS), user)
+        cap_html = cap(sub) if sub else ""
+        html(f'<div class="ph-text">{cap_html}<div class="ph-title" role="heading" aria-level="1">'
              f'{escape(title_text)}</div></div>', width="stretch")
-        st.button(initials(user.get("name", "")), key="topbar_avatar", on_click=go, args=("profile",), width="content")
+        if PROFILE_FOR.get(role):
+            st.button(initials(user.get("name", "")), key="topbar_avatar", on_click=go, args=(PROFILE_FOR[role],),
+                      width="content", help="Profile")
         if actions:
             with st.container(horizontal=True, key="head_actions", gap="small"):
                 for label, key, page, kind in actions:
@@ -234,36 +304,16 @@ def page_header(user: dict, title_text: str, sub: str | None = None, actions=())
 
 
 def two_columns(name: str, kind: str = "even") -> tuple:
-    """Two columns side by side from 1024px, stacked below. kind: "fixed" (left about 420px), "even" (halves),
-    "rev" (halves; the first column is drawn on the RIGHT on a laptop and comes first on a phone)."""
+    """Two columns side by side from 1100px, stacked below. kind: "fixed" (the first column a little wider), "even"
+    (halves), "rev" (halves; the first column is drawn on the RIGHT on a laptop and comes first on a phone), "side" (the
+    second column 380px, e.g. the lender's Decision card)."""
     with st.container(key=f"grid_{kind}_{name}"):
         a, b = st.container(key=f"col_{name}_a"), st.container(key=f"col_{name}_b")
     return a, b
 
 
-# ------------------------------------------------------------------ score chart
-CHART_W, CHART_H = 360, 200
-PLOT_L, PLOT_R, PLOT_T, PLOT_B = 22, 292, 34, 158
-ZONE_WORDS = {"Low risk": "Low", "Moderate risk": "Moderate", "High risk": "High", "Very high risk": "Very high"}
-
-
-def tier_boundaries() -> list:
-    """[(score, tier above the line, tier below)] from scoring.TIER_BANDS converted with pd_to_score (never
-    hard-coded): with the current bands 660, 598 and 545."""
-    bands = SC.TIER_BANDS
-    return [(int(SC.pd_to_score(upper)), name, nxt) for (upper, name), (_, nxt) in zip(bands, bands[1:])]
-
-
-def _y_range(scores: list, lines: list) -> tuple:
-    lo, hi = min(scores), max(scores)
-    below, above = [b for b in lines if b <= lo], [b for b in lines if b >= hi]
-    lo = min(lo, max(below)) if below else lo                # the nearest zone line under the lowest score
-    hi = max(hi, min(above)) if above else hi                # and over the highest
-    if hi - lo < 60:                                         # never zoom in so far that small changes look large
-        mid = (hi + lo) / 2
-        lo, hi = mid - 30, mid + 30
-    pad = max(10.0, 0.12 * (hi - lo))
-    return lo - pad, hi + pad
+# ------------------------------------------------------------------ the hero score card and its chart
+CHART_W, CHART_H, CHART_PAD = 300, 70, 10
 
 
 def _trend_words(scores: list) -> str:
@@ -275,202 +325,231 @@ def _trend_words(scores: list) -> str:
     return f"last {len(scores)} checks, {move}"
 
 
-def score_chart(points: list, tier: str) -> str:
-    """Inline SVG line chart of the last checks (oldest left; higher score = higher on the chart) with dashed zone lines
-    at the tier boundaries, coloured zone names at the right edge, the latest point larger with an outline in its
-    tier's colour. points: [(created_at ISO, score)], oldest first. Text outside the chart stays outside the figure."""
+def hero_chart(points: list) -> str:
+    """A small score-over-time line in yellow (oldest left; higher score = higher), the dates and scores under it.
+    points: [(created_at ISO, score)], oldest first."""
     if not points:
         return ""
     scores = [int(s) for _, s in points]
-    bounds = tier_boundaries()
-    lo, hi = _y_range(scores, [b for b, _, _ in bounds])
-    y = lambda s: PLOT_T + (hi - s) / (hi - lo) * (PLOT_B - PLOT_T)          # noqa: E731
+    lo, hi = min(scores), max(scores)
+    if hi - lo < 40:                                         # never zoom in so far that small changes look large
+        mid = (hi + lo) / 2
+        lo, hi = mid - 20, mid + 20
     n = len(points)
-    xs = [(PLOT_L + PLOT_R) / 2] if n == 1 else [PLOT_L + i * (PLOT_R - PLOT_L) / (n - 1) for i in range(n)]
-    ys = [y(s) for s in scores]
+    xs = [CHART_W / 2] if n == 1 else [CHART_PAD + i * (CHART_W - 2 * CHART_PAD) / (n - 1) for i in range(n)]
+    ys = [CHART_PAD + (hi - s) / (hi - lo) * (CHART_H - 2 * CHART_PAD) for s in scores]
     out = []
-    # zones: dashed lines and coloured names
-    edges = [hi] + [b for b, _, _ in bounds] + [lo]
-    names = [bounds[0][1]] + [below for _, _, below in bounds]
-    for i, name in enumerate(names):
-        top, bottom = min(edges[i], hi), max(edges[i + 1], lo)
-        if top - bottom <= 0:
-            continue
-        if y(bottom) - y(top) >= 13:
-            out.append(f'<text x="{CHART_W - 2}" y="{(y(top) + y(bottom)) / 2 + 4:.1f}" text-anchor="end" font-size="11" '
-                       f'font-weight="700" fill="{status_color(name)}">{ZONE_WORDS[name]}</text>')
-    for b, _, _ in bounds:
-        if lo < b < hi:
-            out.append(f'<line x1="0" x2="{PLOT_R + 14}" y1="{y(b):.1f}" y2="{y(b):.1f}" stroke="#A79CCF" '
-                       f'stroke-width="1" stroke-dasharray="4 4"/>')
-    # area and line
     if n > 1:
-        line = " ".join(f"{x:.1f},{yy:.1f}" for x, yy in zip(xs, ys))
-        out.append(f'<polygon points="{xs[0]:.1f},{PLOT_B + 6} {line} {xs[-1]:.1f},{PLOT_B + 6}" fill="#EFEAFB"/>')
-        out.append(f'<polyline points="{line}" fill="none" stroke="{theme.PURPLE}" stroke-width="2.5" '
-                   'stroke-linejoin="round" stroke-linecap="round"/>')
-    # points, scores above them, dates under the chart
+        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+        out.append(f'<polyline points="{line}" fill="none" stroke="{theme.GOLD}" stroke-width="3" stroke-linejoin="round" '
+                   'stroke-linecap="round"/>')
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        out.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="#FFFFFF" stroke="{theme.GOLD}" stroke-width="3"/>'
+                   if i == n - 1 else f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{theme.GOLD}"/>')
     days = [_local(iso).strftime("%d %b") for iso, _ in points]
-    with_time = len(set(days)) < len(days)
-    for i, ((iso, _), x, yy, s) in enumerate(zip(points, xs, ys, scores)):
-        last = i == n - 1
-        if last:
-            out.append(f'<circle cx="{x:.1f}" cy="{yy:.1f}" r="6.5" fill="#FFFFFF" stroke="{status_color(tier)}" '
-                       'stroke-width="3"/>')
-            out.append(f'<text x="{x:.1f}" y="{yy - 13:.1f}" text-anchor="middle" font-size="14" font-weight="700" '
-                       f'fill="{theme.INK}">{s}</text>')
-        else:
-            out.append(f'<circle cx="{x:.1f}" cy="{yy:.1f}" r="4" fill="{theme.PURPLE}"/>')
-            out.append(f'<text x="{x:.1f}" y="{yy - 10:.1f}" text-anchor="middle" font-size="11" '
-                       f'fill="{theme.MUTED}">{s}</text>')
-        out.append(f'<text x="{x:.1f}" y="{PLOT_B + 24}" text-anchor="middle" font-size="11" fill="{theme.MUTED}">'
-                   f'{days[i]}</text>')
-        if with_time:
-            out.append(f'<text x="{x:.1f}" y="{PLOT_B + 37}" text-anchor="middle" font-size="10" fill="{theme.MUTED}">'
-                       f'{_local(iso).strftime("%H:%M")}</text>')
-    label = (f"Score chart, {_trend_words(scores)}. Your latest score is in the {tier} zone.")
-    return (f'<div class="score-chart"><svg role="img" aria-label="{escape(label)}" viewBox="0 0 {CHART_W} {CHART_H}" '
-            f'width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Roboto, sans-serif">{"".join(out)}</svg></div>')
+    if len(set(days)) < len(days):                          # two checks on one day: add the time
+        days = [_local(iso).strftime("%d %b %H:%M") for iso, _ in points]
+    labels = "".join(f'<div class="hero-pt"><b>{s}</b><span>{escape(d)}</span></div>' for s, d in zip(scores, days))
+    label = f"Score over time, {_trend_words(scores)}."
+    return (f'<div class="hero-chart"><svg role="img" aria-label="{escape(label)}" viewBox="0 0 {CHART_W} {CHART_H}" '
+            f'preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">{"".join(out)}</svg>'
+            f'<div class="hero-pts" aria-hidden="true">{labels}</div></div>')
 
 
-# ------------------------------------------------------------------ cards shared by Home and Result
+def score_hero(result: dict, points: list | None = None, label: str = "Your score", reasons_button: bool = False) -> None:
+    """The indigo hero card: the score (Outfit, about 88px) out of 850, a yellow tier pill, the estimated default risk
+    and (vendors only) the score-over-time line. Lenders pass no points: no history chart for them."""
+    with st.container(key="card_hero"):
+        html(f'<div class="hero" role="group" aria-label="{escape(label)}"><div>{cap(label)}'
+             f'<div class="hero-score">{int(result["score"])}<span class="hero-of">out of 850</span></div>'
+             f'<div class="hero-meta">{pill(result["tier"], "brand")}'
+             f'<span>Estimated default risk {pct(result["pd"])}</span></div></div>'
+             + (hero_chart(points) if points else "") + "</div>")
+        if reasons_button:
+            st.button("See reasons", key="to_reasons", on_click=go, args=("reasons",), width="stretch")
+
+
 def no_score_card() -> None:
     """The only card on Home (and Result, Reasons) before the first check."""
     with st.container(key="card_noscore"):
-        html(f'<div class="noscore"><span class="icon-circle">{icon("gauge", theme.PURPLE, 26)}</span>'
+        html(f'<div class="noscore"><span class="icon-circle">{icon("gauge", theme.INDIGO, 24)}</span>'
              '<div class="section">See your credit score</div>'
              '<div class="muted">Upload your M-Pesa statement to see your score, what shapes it and how much you '
              'could borrow.</div></div>')
         st.button("Check score", key="cta_score", type="primary", on_click=go, args=("score",), width="stretch")
 
 
-def score_card(result: dict, points: list) -> None:
-    """Score, estimated default risk, the score chart and "See reasons". No tier name under the score."""
-    with st.container(key="card_score"):
-        html(f'<div role="group" aria-label="Your score"><div class="sc-label">Your score</div>'
-             f'<div class="sc-score">{int(result["score"])}<span class="sc-of">out of 850</span></div>'
-             f'<div class="sc-pd">Estimated default risk {pct(result["pd"])}</div></div>'
-             + score_chart(points, result["tier"]))
-        st.button("See reasons", key="to_reasons", on_click=go, args=("reasons",), width="stretch")
-
-
-def limit_lines(el: dict) -> str:
-    """The estimated limit line and its caption (HTML)."""
-    if el["status"] == "eligible":
-        return (f'<div class="lc-limit">Estimated limit: Up to {money(el["max_amount"])}</div>'
-                f'<div class="lc-sub">Comfortable up to {money(el["comfortable_amount"])} · the lender makes the final '
-                'decision</div>')
-    if el["status"] == "not_eligible":
-        return f'<div class="lc-limit">{colored_text("Not eligible right now", "declined")}</div>'
-    return '<div class="lc-limit lc-unknown">Not enough income data</div>'
+FINAL_DECISION = "The lender makes the final decision."
 
 
 def limit_card(result: dict) -> None:
-    """Monthly inflow and transactions used, then the estimated limit."""
+    """The estimated limit ("Up to KES X"), the comfortable amount and the final-decision line; monthly inflow and the
+    transactions used under a rule."""
+    el = result["eligibility"]
     inc, tx = result.get("monthly_income"), result.get("rows_read")
-    inflow = f"{money(inc)}/mo" if inc else "not found"
     with st.container(key="card_limit"):
-        html(f'<div class="lc-stats"><span>Inflow <b>{inflow}</b></span>'
-             f'<span>Tx <b>{int(tx) if tx is not None else "-"}</b></span></div><div class="lc-rule"></div>'
-             + limit_lines(result["eligibility"]))
+        if el["status"] == "eligible":
+            body = (f'<div class="limit-big">Up to {money(el["max_amount"])}</div>'
+                    f'<div class="lc-sub">Comfortable up to {money(el["comfortable_amount"])}</div>'
+                    f'<div class="lc-sub">{FINAL_DECISION}</div>')
+        elif el["status"] == "not_eligible":
+            body = f'<div>{pill("Not eligible right now", "bad")}</div><div class="lc-sub">{FINAL_DECISION}</div>'
+        else:
+            body = '<div class="limit-big">Not enough income data</div>'
+        inflow = f"{money(inc)}/mo" if inc else "not found"
+        html(cap("Estimated limit") + body + f'<div class="lc-stats"><span>Inflow <b>{inflow}</b></span>'
+             f'<span>Transactions <b>{int(tx) if tx is not None else "-"}</b></span></div>')
 
 
-def drags_card(result: dict) -> None:
-    """Up to three reasons that raise risk; nothing when there are none."""
-    drags = [r for r in result["reasons"] if r["direction"] == "Raises risk"][:3]
-    if not drags:
-        return
-    with st.container(key="card_drags"):
-        section("Top score drags")
-        html("".join(reason_row(r["direction"], r["phrase"]) for r in drags))
+QUICK_ACTIONS = (("qa_score", "Check score", "score"), ("qa_apply", "Apply", "apply"), ("qa_reasons", "Reasons", "reasons"),
+                 ("qa_history", "History", "history"))
 
 
-PILLAR_HELP = {
-    "Income stability": "How steady your sales are from week to week, and how many days you trade.",
-    "Cash flow buffer": "How much money stays in your M-Pesa account after you pay out.",
-    "Borrowing distress": "How often you use Fuliza, how fast you repay it and how many payments fail.",
-    "Affordability": "How a typical small loan compares with your monthly income.",
-    "Obligations": "How regularly you pay bills and suppliers.",
-    "History and growth": "How long your statement goes back, and whether your sales are rising.",
-    "Network": "How many different customers pay you, and how much comes in through your till.",
+def quick_actions() -> None:
+    """Four circular actions (60px circles, the label under each); Check score is filled indigo."""
+    with st.container(key="card_quick"):
+        html(cap("Quick actions"))
+        with st.container(horizontal=True, key="quick_row"):
+            for key, label, page in QUICK_ACTIONS:
+                st.button(label, key=key, on_click=go, args=(page,), width="stretch")
+
+
+# ------------------------------------------------------------------ Business health tiles
+PILLAR_HELP = {                         # what each area measures (true for every rating), never a verdict
+    "Income stability": "How steady your weekly income is.",
+    "Cash flow buffer": "How much money you keep in your wallet from day to day.",
+    "Borrowing distress": "How much you rely on Fuliza and short-term borrowing.",
+    "Affordability": "How big your debt payments are compared with your income.",
+    "Obligations": "Whether bills and rent are paid on time.",
+    "History and growth": "How long your history is and whether your income is growing.",
+    "Network": "How many customers and suppliers you deal with repeatedly.",
 }
-RATING_ICONS = {"weak": "triangle", "fair": "alert", "good": "check_circle", "strong": "check_circle"}
-HEALTH_FILTERS = ("all", "work", "good")
+PILLAR_ICONS = {"Income stability": "trend", "Cash flow buffer": "wallet", "Borrowing distress": "credit",
+                "Affordability": "scale", "Obligations": "calendar", "History and growth": "bars", "Network": "users"}
 
 
-def _pillars_in_order(pillars: list) -> list:
-    order = list(service.PILLAR_NAMES)
-    return sorted(pillars, key=lambda p: order.index(p["key"]) if p.get("key") in order else len(order))
+def pillars_in_order(pillars: list) -> list:
+    """Pillars in the model's order (saved checks carry keys, snapshots only names)."""
+    names = list(service.PILLAR_NAMES.values())
+    return sorted(pillars, key=lambda p: names.index(p["name"]) if p.get("name") in names else len(names))
 
 
-def health_rows(pillars: list) -> str:
-    """One expandable row per area (details/summary): name, rating as coloured text with an icon, chevron; a one-line
-    explanation when open."""
+pillars_by_name = pillars_in_order
+
+
+def tiles(pillars: list) -> str:
+    """One tile per area: icon in a 44px soft circle, rating pill top right, Outfit title, one muted line."""
     out = []
-    for p in pillars:
-        color = status_color(p["label"])
-        out.append(f'<details class="xrow"><summary><span class="x-main">{escape(p["name"])}</span>'
-                   f'<span class="x-side">{icon(RATING_ICONS[p["label"].lower()], color, 16)}{status_text(p["label"])}'
-                   f'</span><span class="x-chev">{icon("chevron", theme.MUTED, 18)}</span></summary>'
-                   f'<div class="x-body">{escape(PILLAR_HELP.get(p["name"], ""))}</div></details>')
-    return "".join(out)
+    for p in pillars_in_order(pillars):
+        out.append(f'<div class="tile"><div class="tile-top"><span class="icon-circle">'
+                   f'{icon(PILLAR_ICONS.get(p["name"], "spark"), theme.INDIGO, 22)}</span>{pill(p["label"])}</div>'
+                   f'<div class="tile-title">{escape(p["name"])}</div>'
+                   f'<div class="tile-desc">{escape(PILLAR_HELP.get(p["name"], ""))}</div></div>')
+    return f'<div class="tiles">{"".join(out)}</div>'
 
 
-def health_card(result: dict) -> None:
-    """Business health: the seven areas in the model's order, with filter chips (a pills widget: choosing one reruns
-    the page with everything else in session state unchanged)."""
-    pillars = _pillars_in_order(result["pillars"])
-    work = [p for p in pillars if p["label"].lower() in ("weak", "fair")]
-    good = [p for p in pillars if p["label"].lower() in ("good", "strong")]
-    names = {"all": f"All ({len(pillars)})", "work": f"Needs work ({len(work)})", "good": f"Good or strong ({len(good)})"}
-    with st.container(key="card_health"):
-        section("Business health")
-        choice = st.pills("Show", HEALTH_FILTERS, format_func=names.get, default="all", key="health_filter",
-                          label_visibility="collapsed") or "all"
-        shown = {"all": pillars, "work": work, "good": good}[choice]
-        html(health_rows(shown) if shown else '<div class="muted">No areas in this group.</div>')
+def health_tiles(pillars: list, label: str = "Your financial life") -> None:
+    with st.container(key="health_tiles"):
+        html(cap(label) + tiles(pillars))
 
 
-def latest_apps_card(apps: list) -> None:
-    with st.container(key="card_latest"):
-        with st.container(horizontal=True, key="latest_head", vertical_alignment="center"):
-            html('<div class="section">Latest applications</div>', width="stretch")
-            if apps:
+# ------------------------------------------------------------------ recent activity (Home)
+N_ACTIVITY = 5
+EMPTY_ACTIVITY = "Nothing here yet. Check your score to get started."
+
+
+def activity_items(checks: list, apps: list, n: int = N_ACTIVITY) -> list:
+    """The latest score checks and applications together, newest first: (when ISO, icon, title, pill html)."""
+    items = [(c["created_at"], "gauge", f"Score check · {c['score']}", pill(c["tier"])) for c in checks]
+    items += [(a["created_at"], "send", f"Application to {a['lender']} · {a['ref']}", pill(a["status"].capitalize()))
+              for a in apps]
+    return sorted(items, key=lambda i: i[0], reverse=True)[:n]
+
+
+def activity_card(checks: list, apps: list) -> None:
+    items = activity_items(checks, apps)
+    with st.container(key="card_activity"):
+        with st.container(horizontal=True, key="activity_head", vertical_alignment="center"):
+            html('<div class="section">Recent activity</div>', width="stretch")
+            if items:
                 st.button("View all", key="latest_all", type="tertiary", on_click=go, args=("history",))
-        if not apps:
-            muted("No applications yet.")
-            st.button("Apply to a lender", key="latest_apply", type="tertiary", on_click=go, args=("apply",))
-        for a in apps:
-            st.button(f"{md_escape(a['lender'])}  {status_md(a['status'].capitalize())}", key=f"row_app_{a['id']}",
-                      on_click=go, args=("history",), width="stretch")
+        if not items:
+            muted(EMPTY_ACTIVITY)
+            return
+        html("".join(f'<div class="act"><span class="icon-circle">{icon(ico, theme.INDIGO, 20)}</span>'
+                     f'<div class="act-main"><div class="act-title">{escape(t)}</div>'
+                     f'<div class="act-date">{escape(date_time(when))}</div></div>{p}</div>'
+                     for when, ico, t, p in items))
+
+
+# ------------------------------------------------------------------ lender and admin pieces
+TIER_SHORT = {"Low risk": "Low", "Moderate risk": "Moderate", "High risk": "High", "Very high risk": "Very high"}
+
+
+def tier_word(tier: str) -> str:
+    return TIER_SHORT.get(tier, tier)
+
+
+def snapshot_limit(el: dict) -> tuple:
+    """(text, pill kind or None) of a snapshot's estimated limit: "Up to KES X", "Not eligible" (a red pill) or
+    "Not enough income data" (muted)."""
+    mx = el.get("max_amount")
+    if mx is None:
+        return "Not enough income data", "unknown"
+    return (f"Up to {money(mx)}", None) if mx > 0 else ("Not eligible", "declined")
+
+
+def risk_bars(counts: dict, label: str) -> str:
+    """Horizontal bars of {tier: count} (Low green, Moderate yellow, High orange, Very high red) with the share and
+    count as text, so the colour is never the only cue."""
+    total = sum(counts.values())
+    rows = []
+    for tier, n in counts.items():
+        share = 100 * n / total if total else 0
+        rows.append(f'<div class="bar-row"><span>{escape(tier_word(tier))}</span><span class="bar-track">'
+                    f'<span class="bar-fill" style="display:block;width:{share:.1f}%;'
+                    f'background:{theme.BAR_COLORS.get(tier, theme.LABEL)}"></span></span>'
+                    f'<span class="bar-val">{share:.0f}% · {n}</span></div>')
+    return f'<div class="bars" role="group" aria-label="{escape(label)}">{"".join(rows)}</div>'
 
 
 # ------------------------------------------------------------------ sign in / create account
-AUTH_HEADLINE = "Know your credit score from your M-Pesa statement"
+AUTH_HEADLINE = "Credit for the vendors banks overlook"
+AUTH_LEAD = "Score a statement, see what moves it, and apply to a lender."
 AUTH_POINTS = ("Score an Excel or CSV statement in seconds", "See what lifts or drags your score",
                "Find out how much you can borrow")
 AUTH_FOOTER = "Your statement is read once and never stored."
+SIGNIN_ROLES = "Vendors, lenders and administrators sign in here."
 
 
 def auth_band() -> None:
-    """The navy header band of Sign in and Create account (identical on both, so switching does not shift the
-    layout); from 1024px it is the left half of a split screen. Also injects the auth styles (theme.AUTH_CSS)."""
+    """The dark navy panel of Sign in and Create account (identical on both, so switching does not shift the layout):
+    the left column from 900px, a short header strip (icon and headline) on a phone. No screenshot, no tilt. Also
+    injects the auth styles (theme.AUTH_CSS)."""
     theme.inject_auth()
-    points = "".join(f'<li>{icon("check_circle", theme.AUTH_TICK, 16)}<span>{escape(p)}</span></li>' for p in AUTH_POINTS)
-    headline = escape(AUTH_HEADLINE).replace("M-Pesa", '<span class="nowrap">M-Pesa</span>')   # never break at the hyphen
-    html(f'<div class="auth-band"><div class="auth-brand"><span class="auth-logo">{icon("logo", "#FFFFFF", 22)}</span>'
-         f'<span>{escape(APP_NAME)}</span></div><div class="auth-headline">{headline}</div>'
+    uri = theme.brand_uri(theme.ICON_FILE)
+    mark = f'<img src="{uri}" alt="">' if uri else icon("logo", "#FFFFFF", 26)
+    points = "".join(f'<li>{icon("check_circle", theme.AUTH_TICK, 18)}<span>{escape(p)}</span></li>' for p in AUTH_POINTS)
+    html(f'<div class="auth-band"><span class="auth-mark" aria-hidden="true">{mark}</span>'
+         f'<div class="auth-headline">{escape(AUTH_HEADLINE)}</div><p class="auth-lead">{escape(AUTH_LEAD)}</p>'
          f'<ul class="auth-points">{points}</ul></div>')
 
 
-def auth_title(heading: str, sub: str) -> None:
-    html(f'<div class="auth-title" role="heading" aria-level="1">{escape(heading)}</div>'
-         f'<div class="auth-sub">{escape(sub)}</div>')
+def auth_title(heading: str, sub: str | None = None) -> None:
+    """The Nuru logo, then the form's title (and an optional muted line)."""
+    html(f'<div class="auth-logo">{logo_html(132)}</div>'
+         f'<div class="auth-title" role="heading" aria-level="1">{escape(heading)}</div>'
+         + (f'<div class="auth-sub">{escape(sub)}</div>' if sub else ""))
+
+
+def auth_note(text: str, cls: str = "auth-hint") -> None:
+    """A muted line on the sign-in page."""
+    html(f'<div class="{cls}">{escape(text)}</div>')
 
 
 def auth_error(text: str, where=st) -> None:
     """A sign-in or sign-up message: red text with a small icon, no box (read out by screen readers)."""
-    where.markdown(f'<div class="auth-error" role="alert">{icon("alert", theme.ERROR, 16)}<span>{escape(text)}</span></div>',
+    where.markdown(f'<div class="auth-error" role="alert">{icon("alert", theme.DANGER, 16)}<span>{escape(text)}</span></div>',
                    unsafe_allow_html=True)
 
 

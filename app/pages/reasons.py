@@ -1,10 +1,11 @@
 """Reasons, plus a what-if "Test an amount" tool. The slider recomputes ONLY the affordability band from monthly
-income; it never re-scores and never changes the estimated limit. Laptop: two columns; phone: stacked."""
+income; it never re-scores and never changes the estimated limit. Laptop: two columns; phone: stacked. The reasons
+card tilts in when the page opens (not on every slider move)."""
 from html import escape
 
 import streamlit as st
 
-from app import components as ui, service
+from app import components as ui, service, theme
 from app.pages import comfortable_amount, current_result
 
 SLIDER_MIN, SLIDER_MAX, SLIDER_STEP = 1000, 150000, 500
@@ -12,6 +13,8 @@ START_NOTE = "Starts at your comfortable amount. Testing an amount never changes
 
 
 def render(conn, user) -> None:
+    opened = st.session_state.get("prev_page") != "reasons"
+    theme.inject_motion(*(("tilt-in-reasons",) if opened else ()))
     result = current_result(conn, user)
     ui.page_header(user, "Reasons", "What shaped your score")
     if result is None:
@@ -34,14 +37,14 @@ def render(conn, user) -> None:
 
     with test:
         with st.container(key="card_loan"):
-            ui.section("Test an amount")
+            ui.html(ui.cap("Test an amount"))
             ui.html(f'<div class="big-amount" aria-live="polite">{ui.money(amount)}</div>')
             st.slider("Loan amount (KES)", min_value=SLIDER_MIN, max_value=top, value=start, step=SLIDER_STEP,
                       key="loan_amount", format="%d", label_visibility="collapsed")  # the amount above is its label
             share = check["share_of_monthly_income"]
             income = f"{ui.pct(share, 0)} of monthly income" if share is not None else "Monthly income not found"
             ui.html(f'<div class="band-line"><span>{escape(income)}</span>'
-                    f'<span>{ui.status_text(check["band"].capitalize())}</span></div>')
+                    f'<span>{ui.pill(check["band"].capitalize())}</span></div>')
             if check["outside_typical_range"]:
                 ui.muted("Outside typical range")
             ui.muted(START_NOTE)

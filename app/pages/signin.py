@@ -23,6 +23,7 @@ def render(conn, user=None) -> None:
                     st.session_state.pop("signin_password", None)
                     ui.go(HOME_FOR[u["role"]], user_id=u["id"])
                     st.rerun()
-        st.button("New vendor? **Create an account**", key="to_signup", type="tertiary", on_click=ui.go,
+        ui.auth_note(ui.SIGNIN_ROLES)
+        st.button("New to Nuru? **Create an account**", key="to_signup", type="tertiary", on_click=ui.go,
                   args=("signup",), width="stretch")
     ui.auth_footer()

@@ -76,7 +76,8 @@ def find_user_id(conn, email: str) -> int | None:
 
 
 def create_user(conn, email, name, password, role, org_name=None, now=None) -> int:
-    """Insert a user. Vendors come through service.register_vendor; lenders and admins only through scripts."""
+    """Insert a user. Vendors and lenders sign up through service.register_vendor and service.register_lender;
+    lenders and admins are also added by an admin (staff_service.create_staff_user) or by scripts."""
     if role not in ROLES:
         raise ValueError(f"unknown role {role!r}")
     email = normalise_email(email)

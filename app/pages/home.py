@@ -1,26 +1,26 @@
-"""Home: greeting header with Check score and Apply; the score card (with the score chart), the estimated limit, the top
-score drags, Business health and the latest applications. Laptop: two columns; phone: the same blocks stacked."""
+"""Home: "Good <time of day>, <first name>" with Check score on the right. Row 1: the hero score card (with the score
+over time) and, beside it, the estimated limit and Quick actions. Row 2: "Your financial life", the Business health
+tiles. Row 3: Recent activity (score checks and applications). Laptop: two columns in row 1; phone: stacked."""
 from app import components as ui, service
 from app.pages import chart_points, checks_and_result
 
-N_LATEST = 3
-ACTIONS = (("Check score", "head_score", "score", "primary"), ("Apply", "head_apply", "apply", "secondary"))
+ACTIONS = (("Check score", "head_score", "score", "primary"),)
 
 
 def render(conn, user) -> None:
-    checks, result = checks_and_result(conn, user)        # one checks query: the latest 5 (card and chart)
+    checks, result = checks_and_result(conn, user)        # one checks query: the latest 5 (card, chart and activity)
     hello = f"{ui.greeting()}, {ui.first_name(user)}".rstrip(", ")
     if result is None:
-        ui.page_header(user, hello)
+        ui.page_header(user, hello, "Home")               # the card below has the one Check score button
         ui.no_score_card()                                # one friendly card, nothing else
         return
-    ui.page_header(user, hello, f"Last check · {ui.date_time(result['created_at'])}", actions=ACTIONS)
-    apps = service.list_applications(conn, user["id"])[:N_LATEST]
+    ui.page_header(user, hello, "Home", actions=ACTIONS)
+    apps = service.list_applications(conn, user["id"])
     left, right = ui.two_columns("home", "fixed")
     with left:
-        ui.score_card(result, chart_points(checks, result))
-        ui.limit_card(result)
-        ui.drags_card(result)
+        ui.score_hero(result, chart_points(checks, result))
     with right:
-        ui.health_card(result)
-        ui.latest_apps_card(apps)
+        ui.limit_card(result)
+        ui.quick_actions()
+    ui.health_tiles(result["pillars"])
+    ui.activity_card(checks, apps)

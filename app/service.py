@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +68,10 @@ MSG_PDF_PASSWORD = "This PDF is password protected. Please upload the Excel or C
 MSG_UNREADABLE = "We could not read this statement. Please upload the Excel or CSV statement from M-Pesa."
 MSG_TOO_SHORT = "This statement is too short or has no transactions we can use. Please upload a longer statement."
 MSG_NO_MODEL = "The scoring engine is still starting. Try again in a moment."
+# fixed reason codes of a rejected upload (audit log "upload_rejected"); never the file name or its content.
+# MSG_NO_MODEL is not here: the engine was not ready, the upload itself was not at fault.
+UPLOAD_REJECT_CODES = {MSG_TYPE: "file_type", MSG_SIZE: "too_large", MSG_EMPTY: "empty", MSG_NO_TEXT_PDF: "pdf_no_text",
+                       MSG_PDF_PASSWORD: "pdf_password", MSG_UNREADABLE: "unreadable", MSG_TOO_SHORT: "too_short"}
 MSG_DB_SAVE = "Could not save your result. Please try again."
 MSG_DB_APPLY = "Could not send your application. Please try again."
 MSG_CONSENT = "Tick the box to share this summary with the lender."
@@ -156,6 +160,41 @@ def register_vendor(conn, name, email, password, confirm, now=None) -> dict:
     with db.transaction(conn):                      # the user and its audit row, together
         uid = auth.create_user(conn, email, name, password, "vendor", now=now)
         db.audit(conn, "register", actor_id=uid, target=f"user:{uid}", now=now)
+    return auth.get_user(conn, uid)
+
+
+ORG_MIN, ORG_MAX = 2, 80
+ORG_MISSING = "Enter your organisation name."
+ORG_LENGTH = f"Use {ORG_MIN} to {ORG_MAX} characters for the organisation name."
+ORG_TAKEN = "This organisation already has a lender account."
+
+
+def normalise_org(org_name) -> str:
+    """Trimmed, with runs of spaces collapsed to one ("  Umoja   SACCO " -> "Umoja SACCO")."""
+    return " ".join((org_name or "").split())
+
+
+def org_taken(conn, org: str) -> bool:
+    """True if a lender account already has this organisation name (case-insensitive, after normalise_org)."""
+    org = normalise_org(org)
+    return db.one(conn, select(users.c.id).where(users.c.role == "lender",
+                                                 func.lower(users.c.org_name) == org.lower())) is not None
+
+
+def register_lender(conn, name, email, org_name, password, confirm, now=None) -> dict:
+    """Self-registration of a lender: always role "lender", active at once (no role parameter, so it can never create
+    an admin). A lender account IS the organisation, so the name must be new: one lender account per organisation."""
+    auth.check_new_password(password, confirm)
+    org = normalise_org(org_name)
+    if not org:
+        raise auth.AuthError(ORG_MISSING)
+    if not ORG_MIN <= len(org) <= ORG_MAX:
+        raise auth.AuthError(ORG_LENGTH)
+    with db.transaction(conn):                      # the check, the user and its audit row, together
+        if org_taken(conn, org):
+            raise auth.AuthError(ORG_TAKEN)
+        uid = auth.create_user(conn, email, name, password, "lender", org_name=org, now=now)
+        db.audit(conn, "lender_registered", actor_id=uid, target=f"user:{uid}", now=now)
     return auth.get_user(conn, uid)
 
 
@@ -256,6 +295,21 @@ def _score_upload(file, filename, amount=None, term=None) -> tuple:
     return res, float(amount), float(term)
 
 
+def _score_or_audit(conn, user, file, filename, amount=None, term=None, now=None) -> tuple:
+    """_score_upload, and an "upload_rejected" audit row with a fixed reason code when the statement is refused.
+    The UserError is raised again unchanged; losing the audit row never hides it."""
+    try:
+        return _score_upload(file, filename, amount, term)
+    except UserError as e:
+        code = UPLOAD_REJECT_CODES.get(str(e))
+        if code is not None:
+            try:
+                db.audit(conn, "upload_rejected", actor_id=user["id"], detail=code, now=now)
+            except DB_ERRORS:
+                pass
+        raise
+
+
 def _summary(res: dict, amount: float, term: float, created) -> dict:
     """What the app keeps of a score result (no statement content), with the estimated eligibility."""
     aff = res["affordability"]
@@ -290,7 +344,7 @@ def run_score_check(conn, user, file, filename=None, now=None) -> dict:
     eligibility. `file` is a Streamlit UploadedFile, a binary file object or bytes (then pass `filename`; only its
     extension is used). The statement is never stored; the summary is saved only if save_results is on."""
     auth.require_role(user, "vendor")
-    res, amount, term = _score_upload(file, filename)
+    res, amount, term = _score_or_audit(conn, user, file, filename, now=now)
     created = db.utcnow(now)
     summary = _summary(res, amount, term, created)
     summary["save_error"] = None
@@ -422,7 +476,7 @@ def submit_application(conn, user, lender_id, file, amount, term, consent, filen
     if lender is None:
         raise UserError("Choose a lender.")
     amount, term = _positive(amount, "the amount"), _positive(term, "the number of days")
-    res, amount, term = _score_upload(file, filename, amount, term)
+    res, amount, term = _score_or_audit(conn, user, file, filename, amount, term, now=now)
     summary = _summary(res, amount, term, db.utcnow(now))
     el = summary["eligibility"]
     out = {"outcome": None, "result": summary, "max_amount": el["max_amount"], "application": None}
