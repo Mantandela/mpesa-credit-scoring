@@ -27,8 +27,11 @@ whatever the screen shows.
 - **Statements are never stored.** An upload is read once in memory, scored, and discarded; only the result (score,
   ratings, reasons, request, derived monthly income) is saved, and only if the vendor keeps "Save my score results"
   on. Uploads are Excel or CSV up to 10 MB (a PDF only if it has a text layer).
-- **Apply scores the statement again.** The vendor uploads it with the application, it is scored fresh with the
-  requested amount and term, and the application is sent only if that result allows it.
+- **Apply uses a saved score check, never a second upload.** The application is bound to the vendor's latest saved
+  check (at most 30 days old, `APPLY_CHECK_MAX_AGE_DAYS` in `app/service.py`), and is sent only if the amount is
+  within that check's estimated limit and no application to the same lender with the same check is still pending.
+  The lender's snapshot is built from the check, not recomputed. Without a usable check the page says "Check your
+  score again to apply". With "Save my score results" off there is no saved check, so applying needs it on.
 - **Lenders see a snapshot only:** score, risk level, chance of default, ratings, reasons, the request and the
   estimated limit, plus the vendor's name. Never the statement.
 - **Decisions are final.** A lender approves or declines once; the optional note reaches the vendor.

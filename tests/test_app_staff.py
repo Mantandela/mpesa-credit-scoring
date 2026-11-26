@@ -80,7 +80,7 @@ def test_each_role_is_refused_every_call_of_the_other_roles(env):
                    lambda u: SS.set_user_active(c, u, v["id"], False), lambda u: SS.unlock_user(c, u, v["id"]),
                    lambda u: SS.audit_page(c, u)]
     vendor_calls = [lambda u: service.run_score_check(c, u, b"x", "s.csv"),
-                    lambda u: service.submit_application(c, u, a["id"], b"x", 5000, 14, True, "s.csv")]
+                    lambda u: service.submit_application(c, u, a["id"], 1, 5000, 14, True)]
     for user, calls in ((v, lender_calls + admin_calls), (a, admin_calls + vendor_calls),
                         (adm, lender_calls + vendor_calls), (None, lender_calls + admin_calls)):
         for call in calls:

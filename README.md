@@ -10,8 +10,9 @@ Final-year project, BSc Applied Computer Technology, USIU-Africa.
 ## What it does
 
 A vendor uploads an M-Pesa statement (Excel or CSV) and gets a 300-850 score with plain-language reasons, ratings for
-seven areas of business health and an estimated loan limit. To apply to a lender, the vendor uploads the statement
-again: it is scored fresh, and the application is sent only if the fresh estimate allows the amount. The lender sees a
+seven areas of business health and an estimated loan limit. To apply to a lender, the vendor uses a saved score check
+from the last 30 days (no second upload): the application is bound to that check and is sent only if the check's
+estimated limit allows the amount. The lender sees a
 summary snapshot only (score, risk level, reasons, the request), never the statement, and approves or declines; the
 decision is final. Statements are read once in memory and never stored. Three roles, vendor, lender and admin, are
 enforced on the server for every page and every action. Lenders later record what happened to approved loans, which

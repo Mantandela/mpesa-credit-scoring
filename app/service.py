@@ -6,9 +6,9 @@ function that writes more than one row does so in ONE transaction.
 Two separate flows:
 - Check score (run_score_check): score an uploaded statement at the MEDIAN request (predict.py does this) and add
   the estimated eligibility (src/eligibility.py, a prototype policy). No amount or term is asked for.
-- Apply (submit_application): the statement is uploaded AGAIN and scored fresh with the requested amount and term;
-  the eligibility of THAT result decides whether anything is sent. Lenders receive only a summary snapshot of the
-  fresh result, never the statement.
+- Apply (submit_application): uses the vendor's SAVED score check (at most APPLY_CHECK_MAX_AGE_DAYS old); there is no
+  second upload. The check's estimated limit decides whether anything is sent, and the lender receives a summary
+  snapshot built from that check (never recomputed, never the statement). The application row stores the check id.
 
 Privacy: an uploaded statement is read once, in memory, through predict.score_uploaded_file (one temporary file,
 deleted in a `finally`). Nothing from the statement is stored, logged or put in an error message: the database keeps
@@ -77,6 +77,13 @@ UPLOAD_REJECT_CODES = {MSG_TYPE: "file_type", MSG_SIZE: "too_large", MSG_EMPTY: 
 MSG_DB_SAVE = "Could not save your result. Please try again."
 MSG_DB_APPLY = "Could not send your application. Please try again."
 MSG_CONSENT = "Tick the box to share this summary with the lender."
+# Apply uses a saved score check no older than this (one place to change it)
+APPLY_CHECK_MAX_AGE_DAYS = 30
+MSG_CHECK_AGAIN = "Check your score again to apply."
+MSG_CHECK_UNAVAILABLE = "This score check is not available. Check your score again to apply."
+MSG_CHECK_EXPIRED = (f"Your last score check is more than {APPLY_CHECK_MAX_AGE_DAYS} days old. "
+                     "Check your score again to apply.")
+MSG_DUPLICATE = "You already have a pending application to this lender with this score check."
 DB_ERRORS = (SQLAlchemyError, db.DatabaseUnavailable)
 
 
@@ -445,31 +452,65 @@ def snapshot(summary: dict) -> dict:
     }
 
 
-def _insert_application(conn, vendor, lender, snap: dict, now=None) -> dict:
-    """Store an application. The reference is "A-" + (row id + 100), set in the same transaction as the insert:
-    ids are unique, so two applications sent at the same moment can never share a reference."""
+def _insert_application(conn, vendor, lender, snap: dict, now=None, check_id: int | None = None) -> dict:
+    """Store an application bound to the score check it was made from. The reference is "A-" + (row id + 100), set in
+    the same transaction as the insert: ids are unique, so two applications sent at the same moment can never share
+    a reference. Audit row "application_submitted": the application id and the score check id only."""
     created = db.utcnow(now)
     with db.transaction(conn):
         app_id = int(conn.execute(insert(applications).values(
-            vendor_id=vendor["id"], lender_id=lender["id"], check_id=None, snapshot_json=json.dumps(snap),
+            vendor_id=vendor["id"], lender_id=lender["id"], check_id=check_id, snapshot_json=json.dumps(snap),
             status="pending", created_at=created)).inserted_primary_key[0])
         ref = f"A-{REF_OFFSET + app_id}"
         conn.execute(update(applications).where(applications.c.id == app_id).values(ref=ref))
-        db.audit(conn, "application_sent", actor_id=vendor["id"], target=ref, detail=f"lender:{lender['id']}", now=now)
-    return {"id": app_id, "ref": ref, "lender": lender["org_name"], "status": "pending", "created_at": db.iso(created)}
+        db.audit(conn, "application_submitted", actor_id=vendor["id"], target=f"application:{app_id}",
+                 detail=f"check:{check_id}" if check_id is not None else "check:none", now=now)
+    return {"id": app_id, "ref": ref, "lender": lender["org_name"], "status": "pending", "created_at": db.iso(created),
+            "check_id": check_id}
 
 
-def submit_application(conn, user, lender_id, file, amount, term, consent, filename=None, now=None) -> dict:
-    """Apply for a loan: read the statement NOW, score it fresh with the requested amount and term, and check the
-    estimated eligibility of THAT result before anything is sent.
+def _own_check(conn, user, check_id) -> dict | None:
+    """The saved check `check_id` if it belongs to this vendor, else None (also for a bad or forged id)."""
+    try:
+        check_id = int(check_id)
+    except (TypeError, ValueError):
+        return None
+    row = db.one(conn, select(score_checks).where(score_checks.c.id == check_id, score_checks.c.user_id == user["id"]))
+    return _check_from_row(row) if row else None
 
-    Returns {"outcome", "result", "max_amount", "application"}:
-      "sent"                    the application was stored (snapshot from this fresh scoring)
+
+def check_expired(check: dict, now=None) -> bool:
+    """True when the check is more than APPLY_CHECK_MAX_AGE_DAYS old."""
+    created = datetime.fromisoformat(check["created_at"])
+    return db.utcnow(now) - created > timedelta(days=APPLY_CHECK_MAX_AGE_DAYS)
+
+
+def check_for_apply(conn, user, now=None) -> tuple:
+    """(the latest saved check to apply with, None) or (None, why): why is "not_saved" (no saved check and saving is
+    switched off), "none" (no saved check) or "expired" (the latest is too old)."""
+    auth.require_role(user, "vendor")
+    check = latest_check(conn, user["id"])
+    if check is None:
+        return None, ("not_saved" if not user.get("save_results") else "none")
+    if check_expired(check, now):
+        return None, "expired"
+    return check, None
+
+
+def submit_application(conn, user, lender_id, check_id, amount, term, consent, now=None) -> dict:
+    """Apply for a loan with one of the vendor's SAVED score checks. There is no upload and nothing is re-scored.
+
+    Server-side rules, in this order: vendor only; consent; an active lender; amount and term above 0; the check
+    belongs to this vendor (a forged or unknown id gets the same "not available" message); it is at most
+    APPLY_CHECK_MAX_AGE_DAYS old; the check's estimated eligibility allows the amount; and no application from this
+    vendor to this lender with this check is still pending.
+
+    Returns {"outcome", "result" (the check), "max_amount", "application"}:
+      "sent"                    stored, bound to the check (applications.check_id), snapshot built from the check
       "not eligible"            nothing sent
       "not enough income data"  nothing sent
       "above limit"             nothing sent; max_amount says how much the vendor can apply for
-    Raises UserError without consent, for an unknown lender, a bad amount or term, or an unreadable file.
-    The statement is discarded after scoring, exactly as in Check score; nothing is saved as a score check."""
+    Raises UserError for everything else (consent, lender, amount, check unavailable or expired, duplicate)."""
     auth.require_role(user, "vendor")
     if not consent:
         raise UserError(MSG_CONSENT)
@@ -478,10 +519,13 @@ def submit_application(conn, user, lender_id, file, amount, term, consent, filen
     if lender is None:
         raise UserError("Choose a lender.")
     amount, term = _positive(amount, "the amount"), _positive(term, "the number of days")
-    res, amount, term = _score_or_audit(conn, user, file, filename, amount, term, now=now)
-    summary = _summary(res, amount, term, db.utcnow(now))
-    el = summary["eligibility"]
-    out = {"outcome": None, "result": summary, "max_amount": el["max_amount"], "application": None}
+    check = _own_check(conn, user, check_id)
+    if check is None:
+        raise UserError(MSG_CHECK_UNAVAILABLE)
+    if check_expired(check, now):
+        raise UserError(MSG_CHECK_EXPIRED)
+    el = check["eligibility"]
+    out = {"outcome": None, "result": check, "max_amount": el["max_amount"], "application": None}
     if el["status"] == "not_eligible":
         out["outcome"] = OUTCOME_NOT_ELIGIBLE
     elif el["status"] == "unknown":
@@ -494,8 +538,18 @@ def submit_application(conn, user, lender_id, file, amount, term, consent, filen
         except DB_ERRORS:
             pass                                   # the refusal stands; only its audit row is lost
         return out
+    # the snapshot is the saved check as it is, with this request (the band is read from the check's monthly income)
+    snap = snapshot(dict(check, request_amount=amount, request_term=term,
+                         affordability_band=affordability_band(amount, check["monthly_income"])))
+    a = applications
     try:
-        out["application"] = _insert_application(conn, user, lender, snapshot(summary), now)
+        with db.transaction(conn):                 # the duplicate check and the insert, together
+            dup = conn.execute(select(a.c.id).where(a.c.vendor_id == user["id"], a.c.lender_id == lender["id"],
+                                                    a.c.check_id == check["check_id"], a.c.status == "pending")
+                               .limit(1)).first()
+            if dup is not None:
+                raise UserError(MSG_DUPLICATE)
+            out["application"] = _insert_application(conn, user, lender, snap, now, check_id=check["check_id"])
     except DB_ERRORS:
         raise UserError(MSG_DB_APPLY) from None    # nothing was stored (one transaction)
     out["outcome"] = OUTCOME_SENT

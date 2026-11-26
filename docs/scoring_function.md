@@ -96,9 +96,10 @@ income is statement **turnover** (money received from customers), not profit; th
 applicants; and nothing here is validated on real repayment outcomes. The app says "The lender makes the final
 decision."
 
-In the app, Check score shows the estimate. Apply asks for the statement again, scores it fresh with the requested
-amount and term, and sends the application only if the fresh estimate is "eligible" and the amount is within
-`max_amount`. Otherwise it says why (above the limit, with the limit; not eligible; not enough income data).
+In the app, Check score shows the estimate and saves it with the check. Apply uses that saved check (at most 30
+days old) with no second upload and nothing re-scored, and sends the application only if the check's estimate is
+"eligible" and the amount is within its `max_amount`. Otherwise it says why (above the limit, with the limit; not
+eligible; not enough income data). See [app_overview.md](app_overview.md#privacy-and-security-rules).
 
 ## Output (example: a simulated vendor, 6-month statement, KES 5,000 for 14 days; numbers rounded)
 

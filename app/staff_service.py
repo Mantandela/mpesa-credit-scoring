@@ -358,7 +358,7 @@ def describe(action: str, target: str | None, detail: str | None, target_email: 
         "sign_in": "Signed in",
         "password_changed": "Changed their password",
         "delete_saved_results": "Deleted their saved score results",
-        "application_sent": f"Sent application {ref}",
+        "application_sent": f"Sent application {ref}",                     # rows written before checks were linked
         "application_approved": f"Approved application {ref}",
         "application_declined": f"Declined application {ref}",
         "user_disabled": f"Disabled {who}",
@@ -372,6 +372,11 @@ def describe(action: str, target: str | None, detail: str | None, target_email: 
         return f"Failed sign-in ({auth.MAX_FAILED_ATTEMPTS}th), account locked" if detail == "locked" else "Failed sign-in"
     if action == "score_check":
         return "Ran a score check" + (" (not saved)" if target == "not_saved" else "")
+    if action == "application_submitted":
+        app_id = (target or "").removeprefix("application:")
+        check = (detail or "").removeprefix("check:")
+        sent = f"Sent application A-{100 + int(app_id)}" if app_id.isdigit() else "Sent an application"
+        return sent + (f" with score check C-{100 + int(check)}" if check.isdigit() else "")
     if action == "application_refused":
         return "Application not sent: " + REFUSALS.get(detail or "", "not eligible")
     if action == "repayment_recorded":

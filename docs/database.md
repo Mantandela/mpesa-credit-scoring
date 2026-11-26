@@ -1,6 +1,9 @@
 # Database
 
-The web app stores accounts, saved score results, applications, repayment outcomes and an audit log. **All data in this project is
+The web app stores accounts, saved score results, applications, repayment outcomes and an audit log. Each
+application stores the id of the saved score check it was made with (`applications.check_id`, a nullable foreign key
+that already existed; set to NULL if the vendor deletes their saved results), and its snapshot is built from that
+check. **All data in this project is
 simulated**: the model is trained on synthetic statements and the demo accounts are made up. No statement content is
 ever stored: a score check keeps only the result (score, ratings, reason phrases, request, derived monthly income,
 number of rows read), lenders receive only a summary, and the audit log holds actions and ids.

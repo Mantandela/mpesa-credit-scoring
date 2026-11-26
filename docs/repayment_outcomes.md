@@ -29,7 +29,7 @@ admin and the number of rows). Only loans with a **final** outcome are exported;
 | Column | Meaning |
 | --- | --- |
 | `application_id` | The application's internal id |
-| `score_check_id` | The saved score check behind it. **Empty today:** an application is scored fresh from the statement uploaded with it and is not linked to a saved check |
+| `score_check_id` | The saved score check the application was made with (`applications.check_id`). Empty for applications sent before applications were bound to a check, and when the vendor later deleted their saved results (the link is cleared, the lender's snapshot stays) |
 | `snapshot_score` | The 300-850 score the lender saw |
 | `snapshot_pd` | The estimated chance of default behind that score |
 | `risk_tier` | Low, Moderate, High or Very high risk |

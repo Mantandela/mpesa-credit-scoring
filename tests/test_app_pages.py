@@ -293,7 +293,7 @@ def _score(env, user, vendor=None):
 
 
 def _stored_application(env, user, result):
-    """An application as submit_application stores it (AppTest cannot upload a file to the Apply screen)."""
+    """An application stored directly (as submit_application stores it), with the snapshot of `result`."""
     lender = {"id": env["lender"]["id"], "org_name": "Umoja SACCO"}
     return service._insert_application(env["conn"], user, lender, service.snapshot(result))
 
@@ -510,32 +510,38 @@ def test_vendor_journey(env):
     assert components.pill(band.capitalize()) in after
     assert at.session_state["result"] == result                                    # never re-scored
 
-    # Apply: lender, amount and days (median request), the statement again, consent, one button
+    # Apply: the latest saved check, then amount and days, lender, consent, one button. No upload.
     at.button(key="reasons_apply").click().run()
     _no_errors(at)
+    assert not at.get("file_uploader")                                             # no second upload
     radio = at.radio(key="apply_lender")
     assert sorted(radio.options) == ["Tumaini Microfinance", "Umoja SACCO"]       # organisation names are shown
     assert (at.number_input(key="apply_amount_in").value, at.number_input(key="apply_term_in").value) == \
         (9200, int(med[1]))                                    # amount prefilled with the comfortable amount
     text = _text(at)
-    assert "Your estimated limit" in text and "Up to KES 34,300" in text and "Comfortable up to KES 9,200" in text
+    assert "Your score check" in text and f"C-{100 + result['check_id']}" in text and f"{result['score']} / 850" in text
+    assert "Up to KES 34,300" in text and "Up to KES 9,200" in text and components.pill(result["tier"]) in text
     assert "Your request" in text and "The lender makes the final decision." in text
-    assert len(at.get("file_uploader")) == 1
+    assert "checked again" not in text and "upload" not in text.lower()
     assert at.checkbox(key="apply_consent").label == \
         "Share my score summary with the lender. My statement is never shared."
     send = at.button(key="send_application")
-    assert send.label == "Send application" and send.disabled                      # needs the statement and consent
-    # AppTest cannot upload a file: send the way the button does, then continue on the Sent screen
-    out = service.submit_application(env["conn"], user, env["lender"]["id"], H.Upload(H.statement_csv(RICH), "s.csv"),
-                                     20000, 30, True)
-    assert out["outcome"] == service.OUTCOME_SENT
-    at.session_state["sent"] = out["application"]
-    at.session_state["page"] = "sent"
-    at.run()
+    assert send.label == "Send application" and send.disabled                      # needs consent
+    at.radio(key="apply_lender").set_value(env["lender"]["id"])
+    at.number_input(key="apply_amount_in").set_value(20000)
+    at.number_input(key="apply_term_in").set_value(30)
+    at.checkbox(key="apply_consent").check().run()
+    assert not at.button(key="send_application").disabled
+    at.button(key="send_application").click().run()
     _no_errors(at)
+    assert at.session_state["page"] == "sent"
     sent = at.session_state["sent"]
+    assert sent["check_id"] == result["check_id"]
+    row, = H.rows(env["conn"], "applications", id=sent["id"])
+    assert row["check_id"] == result["check_id"] and json.loads(row["snapshot_json"])["score"] == result["score"]
     text = _text(at)
     assert "Application sent" in text and "Umoja SACCO" in text and sent["ref"] in text and "Pending" in text
+    assert f"C-{100 + result['check_id']}" in text and "Your statement is never shared." in text
 
     # History: the two checks and the application (a table on a laptop, expandable rows on a phone)
     at.button(key="sent_history").click().run()
@@ -601,40 +607,68 @@ def test_result_without_income_data(env):
     assert "Not enough income data" in _text(at) and "Up to KES" not in _text(at)
 
 
-@pytest.mark.parametrize("msg, shown, see_why", [
-    (("above", "You can apply for up to KES 34,300. Lower the amount and try again."),
-     "You can apply for up to KES 34,300. Lower the amount and try again.", False),
-    (("not_eligible", "Not eligible right now."), "Not eligible right now.", True),
-    (("no_income", "Not enough income data."), "Not enough income data.", False),
-    (("error", "This PDF has no selectable text. Please upload the Excel or CSV statement."),
-     "This PDF has no selectable text. Please upload the Excel or CSV statement.", False),
-])
-def test_apply_outcome_lines(env, msg, shown, see_why):
-    at = _app(user_id=env["vendor"]["id"], page="apply", apply_msg=msg)
+def test_apply_page_has_no_file_uploader_and_no_upload_copy(env):
+    result = _score(env, env["vendor"], RICH)
+    at = _app(user_id=env["vendor"]["id"], page="apply")
     _no_errors(at)
-    assert shown in _text(at) and at.session_state["page"] == "apply"
-    assert any(b.key == "apply_see_why" for b in at.button) == see_why
-    assert len(at.get("file_uploader")) == 1                  # the statement is asked for again
-
-
-def test_apply_page_never_keeps_the_statement():
+    assert not at.get("file_uploader")
+    text = _text(at)
+    assert "Uses your latest score check" in text and "Your statement is checked again" not in text
+    assert f"C-{100 + result['check_id']}" in text
     src = (H.ROOT / "app" / "pages" / "apply.py").read_text(encoding="utf-8")
-    assert "apply_upload_n" in src and src.count('st.session_state["apply_upload_n"] = n + 1') >= 2
+    assert "file_uploader" not in src and "apply_upload" not in src
 
 
-def test_apply_without_a_known_limit_uses_the_median_request(env):
-    at = _app(user_id=env["vendor"]["id"], page="apply")       # no score yet
+@pytest.mark.parametrize("state", ["none", "expired", "not_saved"])
+def test_without_a_usable_check_the_page_asks_to_check_again(env, state):
+    user = env["vendor"]
+    if state == "expired":
+        _score(env, user, RICH)
+        with db.transaction(env["conn"]):                                    # make the check 31 days old
+            env["conn"].execute(db.score_checks.update().values(
+                created_at=db.utcnow() - timedelta(days=service.APPLY_CHECK_MAX_AGE_DAYS + 1)))
+    if state == "not_saved":
+        user = service.update_profile_flags(env["conn"], user["id"], save_results=False)
+        _score(env, user, RICH)
+    at = _app(user_id=user["id"], page="apply")
     _no_errors(at)
-    assert "Your estimated limit" not in _text(at)
-    assert at.number_input(key="apply_amount_in").value == int(service.median_request()[0])
+    text = _text(at)
+    assert "Check your score again to apply" in text and not at.get("file_uploader")
+    assert not [b for b in at.button if b.key == "send_application"] and not at.number_input
+    if state == "not_saved":
+        assert "Save my score results" in text
+    at.button(key="apply_check_score").click().run()
+    assert at.session_state["page"] == "score"
 
 
-def test_apply_and_reasons_with_a_very_high_result_fall_back_to_the_median(env):
+def test_apply_above_the_limit_and_duplicate_show_their_messages(env):
+    _score(env, env["vendor"], RICH)
+    at = _app(user_id=env["vendor"]["id"], page="apply")
+    at.radio(key="apply_lender").set_value(env["lender"]["id"])
+    at.number_input(key="apply_amount_in").set_value(34400)
+    at.checkbox(key="apply_consent").check().run()
+    at.button(key="send_application").click().run()
+    _no_errors(at)
+    assert "You can apply for up to KES 34,300. Lower the amount and try again." in _text(at)
+    assert at.session_state["page"] == "apply" and db.count(env["conn"], "applications") == 0
+    at.number_input(key="apply_amount_in").set_value(9000)
+    at.button(key="send_application").click().run()
+    assert at.session_state["page"] == "sent"
+    at = _app(user_id=env["vendor"]["id"], page="apply")
+    at.radio(key="apply_lender").set_value(env["lender"]["id"])
+    at.checkbox(key="apply_consent").check().run()
+    at.button(key="send_application").click().run()
+    assert service.MSG_DUPLICATE in _text(at) and db.count(env["conn"], "applications") == 1
+
+
+def test_apply_with_a_very_high_check_is_not_eligible_and_cannot_send(env):
     result = _score(env, env["vendor"])                        # Very high risk: no comfortable amount
-    at = _app(user_id=env["vendor"]["id"], page="apply", result=result)
+    at = _app(user_id=env["vendor"]["id"], page="apply")
     _no_errors(at)
-    assert "Your estimated limit" in _text(at) and "Not eligible right now" in _text(at)
-    assert at.number_input(key="apply_amount_in").value == int(service.median_request()[0])
+    assert "Not eligible right now." in _text(at) and any(b.key == "apply_see_why" for b in at.button)
+    assert at.number_input(key="apply_amount_in").value == int(result["request_amount"])
+    at.checkbox(key="apply_consent").check().run()
+    assert at.button(key="send_application").disabled
     at = _app(user_id=env["vendor"]["id"], page="reasons", result=result)
     assert at.slider(key="loan_amount").value == int(service.median_request()[0])
 
