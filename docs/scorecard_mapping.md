@@ -1,12 +1,12 @@
 # Scorecard mapping: pillars, features and directions
 
 The cash-flow scorecard (`src/scorecard.py`, settings in `SCORECARD_PILLARS` in `src/config.py`) turns features into
-the default probability that the simulated labels are drawn from (`docs/personas.md`, `docs/assumptions.md` row 10c).
+the default probability that the simulated labels are drawn from ([personas.md](personas.md), [assumptions.md](assumptions.md) row 10c).
 Each feature gets a **direction**: +1 means a higher value raises risk, -1 means it lowers risk. A pillar score is the
 average of direction x z-score (median and standard deviation of all applications, clipped at +/-3) of its features.
 
 **Directions were fixed from lending logic before any result and are never tuned to the data.** Features whose raw
-association with the simulated default is opposite to their direction are listed in `docs/scorecard_report.md` as a
+association with the simulated default is opposite to their direction are listed in [scorecard_report.md](scorecard_report.md#directions-that-disagree-with-the-raw-association) as a
 limitation; the direction is not changed. Weights and directions are author's assumptions (no published cash-flow
 weights exist; see row 10c).
 
@@ -65,3 +65,10 @@ report, where its raw association disagreed with the +1 direction (raw AUC 0.462
 the v0.7 generator fix (supplier and bill payments), the same feature agrees with +1 (raw AUC 0.612), and it stays
 out: the reason for the removal is the ambiguity above, which applies whatever the data shows. No other direction was
 changed. Both numbers are given only so that the order of events is on record.
+
+## See also
+
+- [Project README](../README.md)
+- [Scorecard report](scorecard_report.md)
+- [Scoring function](scoring_function.md)
+- [Assumptions](assumptions.md)

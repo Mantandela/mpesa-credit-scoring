@@ -97,3 +97,19 @@ Logistic regression coefficients (inputs are rank-normalised, so sizes are compa
 - free_cash_flow_ratio_90: -0.05
 
 Next: SHAP explanations, fairness check by gender, and the affordability simulation.
+
+## Limits
+
+- **Simulated outcomes.** The models recover a synthetic default drawn from the scorecard; nothing here says how they
+  would perform on real borrowers.
+- **Small test set.** The test vendors hold few defaults (the split table above), so every test AUC has a wide
+  interval and the intervals of the models overlap. A ranking of the models is not supported where they overlap; the
+  paired differences in [calibration_report.md](calibration_report.md#discrimination-test-set) all include zero.
+- See [calibration_report.md](calibration_report.md#limits) for the full list.
+
+## See also
+
+- [Project README](../README.md)
+- [Calibration report](calibration_report.md)
+- [Scorecard report](scorecard_report.md)
+- [Sensitivity report](sensitivity_report.md)

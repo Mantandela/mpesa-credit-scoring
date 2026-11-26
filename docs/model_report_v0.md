@@ -97,3 +97,16 @@ Logistic regression coefficients (inputs are rank-normalised, so sizes are compa
 - free_cash_flow_ratio_90: -0.05
 
 Next: SHAP explanations, fairness check by gender, and the affordability simulation.
+
+## Limits
+
+This is sensitivity variant 0: author weights, shock 0.5 (the main run, identical to model_report.md), row 1 of the tables in [sensitivity_report.md](sensitivity_report.md).
+Its outcomes are redrawn from a different simulated scorecard, so its numbers are not the deployed model's; those
+are in [model_report.md](model_report.md). The outcomes are simulated and the test set is small, so the intervals
+are wide ([calibration_report.md](calibration_report.md#limits)).
+
+## See also
+
+- [Project README](../README.md)
+- [Sensitivity report](sensitivity_report.md)
+- [Model report](model_report.md)

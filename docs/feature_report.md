@@ -1,6 +1,6 @@
 # Feature report
 
-2,261 applications, 52 features. Outcomes are made later by src/scorecard.py; the signal check against them is in docs/scorecard_report.md.
+2,261 applications, 52 features. Outcomes are made later by src/scorecard.py; the signal check against them is in [scorecard_report.md](scorecard_report.md).
 
 Leakage test: PASS, no feature changed when later transactions were deleted
 
@@ -11,3 +11,10 @@ Leakage test: PASS, no feature changed when later transactions were deleted
 | fuliza_repay_lag_median_days_90 | 39.5% |
 | balance_trend_90 | 7.5% |
 | income_trend_30_vs_prior | 6.9% |
+
+## See also
+
+- [Project README](../README.md)
+- [Data dictionary](data_dictionary.md)
+- [Cleaning report](cleaning_report.md)
+- [Scorecard report](scorecard_report.md)

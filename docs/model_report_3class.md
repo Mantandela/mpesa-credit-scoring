@@ -52,3 +52,17 @@ Macro AUC is the average of the one-vs-rest AUCs. The late class is small, so it
 | late | 40 | 1 | 0 |
 | default | 43 | 0 | 19 |
 
+## Limits
+
+- The three classes are simulated: default comes from the scorecard and lateness from simulated Fuliza draws
+  ([personas.md](personas.md#linking-persona-to-the-loan-outcome-v06)). The late class is small, and every model
+  recalls almost none of it.
+- The test set is small, so these figures are noisy ([calibration_report.md](calibration_report.md#limits)).
+- Recorded repayment outcomes map onto these classes for future work
+  ([repayment_outcomes.md](repayment_outcomes.md#mapping-to-the-three-outcome-classes)).
+
+## See also
+
+- [Project README](../README.md)
+- [Model report](model_report.md)
+- [Repayment outcomes](repayment_outcomes.md)

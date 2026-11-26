@@ -74,3 +74,10 @@ Earlier versions: v0.4 drew `defaulted` as a coin flip with probability `latent_
 3. Persona overlap shows up: some vendors from different personas look alike.
 4. The default rate per persona follows the order stable < growing < seasonal and new < struggling, but with visible exceptions.
 5. The overall `defaulted` rate is between 14% and 19%, and all Fuliza draws are under KES 1,000.
+
+## See also
+
+- [Project README](../README.md)
+- [Assumptions](assumptions.md)
+- [Scorecard mapping](scorecard_mapping.md)
+- [Data dictionary](data_dictionary.md)

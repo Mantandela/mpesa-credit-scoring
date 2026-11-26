@@ -42,7 +42,7 @@ Test set: 350 applications from 151 vendors, 62 defaults (17.7%). Same vendor sp
 
 The visible scorecard is the rule the synthetic defaults were drawn from (without its hidden terms), scored with no fitting, so it is close to the best ranking the visible data allow; it is a ceiling to compare with, not a competing model.
 
-Logistic: KS 0.440, Gini 0.451. Resampling whole vendors instead (as `docs/model_report.md` does, because one vendor's applications are not independent) gives a wider interval: 0.638 to 0.808.
+Logistic: KS 0.440, Gini 0.451. Resampling whole vendors instead (as `docs/model_report.md` does, because one vendor's applications are not independent) gives a wider interval: 0.638 to 0.808. ([model_report.md](model_report.md#results) shows 0.644 to 0.807 for the same idea: it draws 1,000 vendor resamples with a different random sequence, so the ends differ slightly; neither is more correct.)
 
 ## Calibration of the PD
 
@@ -159,3 +159,10 @@ Not recommended on this evidence. If a later run shows a bias or slope problem t
 - **The test set has only 62 defaults.** Intervals are wide: a tier or decile holds a handful of defaults, the Hosmer-Lemeshow test is indicative only, and the half-sample AUCs above show how far one number can move.
 - **Model ranking is not supported where intervals overlap.** The paired AUC differences are the right test, and an interval that includes 0 means the data cannot tell the models apart.
 - The bootstrap resamples applications. One vendor can have up to 4 applications, which are not independent; the vendor-level interval above is the more cautious one.
+
+## See also
+
+- [Project README](../README.md)
+- [Model report](model_report.md)
+- [Scoring function](scoring_function.md)
+- [Repayment outcomes](repayment_outcomes.md)

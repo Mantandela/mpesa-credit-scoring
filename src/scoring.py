@@ -11,7 +11,9 @@ The three constants are ASSUMPTIONS (docs/assumptions.md), not estimates from da
     BASE_SCORE = 600 at BASE_ODDS = 5 : 1 good to bad. 5:1 is a PD of 16.7%, the average default rate the scorecard is
                  calibrated to (FinAccess 2024, 16.6%). A vendor at the portfolio average scores 600.
     PDO        = 50 points for every doubling of the odds.
-With these, PD 2% scores about 764, 5% about 696, 17% about 600, 50% about 484 and 80% about 384.
+With these, PD 2% scores 765 (764.6 before rounding), 5% 696, 16.7% exactly 600, 17% 598, 50% 484 and 80% 384.
+Tier boundaries on the score scale: 660.08 (PD 8%), 598.28 (17%), 545.02 (30%); the tier comes from the PD, so the
+rounded scores 660, 598 and 545 can fall in either neighbouring tier (docs/scoring_function.md).
 
 Risk tiers are bands of the PD. They are illustrative cut-offs; check the share of applications in each band after the
 final run, and change them in TIER_BANDS if one band is nearly empty.

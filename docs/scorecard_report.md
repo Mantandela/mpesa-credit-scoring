@@ -84,3 +84,17 @@ Features expected to carry little or no signal in the simulation (where the raw 
 
 - requested_term_days (set to +1, raw AUC 0.502, agrees in this run): no signal by design: the term is drawn at random, never from risk
 - failed_payment_share_90 (set to +1, raw AUC 0.582, agrees in this run): most failures are the random 1% added to test the cleaning step, but a payment that a short wallet cannot cover and Fuliza does not fund can also fail, so it can carry some signal through tight cash
+- All outcomes are simulated and the test set is small, so intervals are wide ([calibration_report.md](calibration_report.md#limits)).
+
+Note on the AUCs in "How predictable is default?": they are computed on all 2,261 applications. The best possible
+AUC (0.773) is the full scorecard probability **including** its hidden terms; the visible score (0.743 here) is the
+scorecard without them. The visible scorecard's AUC on the **test vendors** only is the `scorecard_baseline` row of
+[model_report.md](model_report.md#results). `fuliza_late` is an outcome recorded after the application, never a
+model input.
+
+## See also
+
+- [Project README](../README.md)
+- [Scorecard mapping](scorecard_mapping.md)
+- [Model report](model_report.md)
+- [Personas](personas.md)

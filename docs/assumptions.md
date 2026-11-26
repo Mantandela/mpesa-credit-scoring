@@ -65,8 +65,10 @@ Status: v0.3. Rows 1 to 10b hold the sources you found, tidied into one value pe
 - In real statements a payment and its charge (or its Fuliza draw) share a receipt number and the same second, so the duplicate-receipt and time-order checks fire on many rows. These are reported as counts, not errors. The order of rows inside one second is not the order they happened in: on the author's statement 804 of 3,099 rows broke the running balance as listed. `read_statement` reorders rows only inside a same-second group so the balance follows on, which leaves 35 breaks (1.1%); over the whole statement, total paid in minus withdrawn equals the change in balance exactly, so no row is missing.
 - Before the fix in `clean.read_real_statement`, a sheet that mixed `HH:MM:SS` and `HH:MM:SS.ffffff` lost every row in the minority format without a message (476 of 3,099 rows kept), and a day-first fallback could read `2026-01-03` as 1 March. Both are fixed and tested; any row that still cannot be read is counted and raised as a warning, never dropped silently. A few real receipt numbers contain no digit, so receipt patterns require only a capital letter.
 - Real statements mark failed transactions in the status column. The readers add a "Failed - " prefix to the details of those rows so that `clean.py` treats them as failed, as it does for the generator.
-- After the v0.7 generator fix, three scorecard directions disagree with the raw association against simulated default (directions are not changed): `net_cash_flow_ratio_90` (-1, raw AUC 0.513), `reversal_count_90` (+1, 0.499) and `essential_outflow_share_90` (-1, 0.637; struggling vendors make few supplier payments, so bills and airtime are a large share of what they spend). `requested_term_days` has no signal by design (0.502); `failed_payment_share_90` (0.582) carries some, because a payment a short wallet cannot cover can fail. Before v0.7 the list was `withdraw_share_of_income_90` (0.462), `failed_payment_share_90` (0.480), `requested_term_days` (0.499) and four of the five pillar E features, which came from the generator bug, not from the directions. See `docs/scorecard_report.md`.
+- After the v0.7 generator fix, three scorecard directions disagree with the raw association against simulated default (directions are not changed): `net_cash_flow_ratio_90` (-1), `reversal_count_90` (+1) and `essential_outflow_share_90` (-1; struggling vendors make few supplier payments, so bills and airtime are a large share of what they spend). `requested_term_days` has no signal by design; `failed_payment_share_90` carries some, because a payment a short wallet cannot cover can fail. The current raw AUCs are in [scorecard_report.md](scorecard_report.md#directions-that-disagree-with-the-raw-association). Before v0.7 the list was `withdraw_share_of_income_90` (0.462), `failed_payment_share_90` (0.480), `requested_term_days` (0.499) and four of the five pillar E features, which came from the generator bug, not from the directions.
 - The v0.7 cash top-up for planned supplier payments and on-time bills makes `cash_deposit_share_90` (a model input, not a scorecard input) higher for vendors who pay regularly; real vendors may instead keep money in the wallet.
+
+- The web app does not check that an uploaded statement belongs to the signed-in vendor, and self-registered lenders are not verified ([app_overview.md](app_overview.md#limitations)).
 
 Add each new limitation here as you find it, and copy the final list into the limitations section of your report.
 
@@ -102,3 +104,10 @@ Source: the author's own M-Pesa statement, 215 days (8 calendar months), 3,099 c
 | O12 | Other mobile loans (M-Shwari, KCB M-Pesa)           | Fewer than 5 events                                                                                            | none                                         | No information on these loans from this account.                                                                                                                        |
 
 Limits of section 5: one account; personal and business money mixed; repayments not matched to specific draws; transactions classified by the wording of the Details column (0% left unclassified after the second run).
+
+## See also
+
+- [Project README](../README.md)
+- [Personas](personas.md)
+- [Scorecard mapping](scorecard_mapping.md)
+- [Calibration report: Limits](calibration_report.md#limits)

@@ -1,7 +1,7 @@
 # Scoring function
 
-`src/predict.py` scores one M-Pesa statement with the trained logistic regression. The dashboard and the vendor
-self-check will call it. **All outcomes the model learned from are simulated** (scorecard -> probability -> drawn
+`src/predict.py` scores one M-Pesa statement with the trained logistic regression. The web app calls it from Check
+score and Apply ([app_overview.md](app_overview.md)). **All outcomes the model learned from are simulated** (scorecard -> probability -> drawn
 labels), so the score shows how the method works, not how a real borrower would repay.
 
 ## Supported inputs
@@ -35,7 +35,8 @@ result = score_uploaded_file(uploaded_bytes, "statement.xlsx", requested_amount=
 `score_uploaded_file` holds the upload in memory and writes it to one temporary file with a random name in the
 system temp folder, because the readers work from a path. The temporary file is deleted in a `finally` block, after
 success and after any error. The upload is never written anywhere else, logged or cached. Files over 20 MB, empty files
-and other file types are refused before anything is written.
+and other file types are refused before anything is written. The web app sets a lower limit of 10 MB and checks it
+before it calls `predict`.
 
 CLI (prints JSON only, never transaction details):
 
@@ -162,6 +163,13 @@ For this vendor (about KES 206,300 of customer income a month), KES 1,000 to 10,
 Risk tiers (`scoring.TIER_BANDS`): Low below PD 8%, Moderate 8% to 17%, High 17% to 30%, Very high 30% and above. At
 the median request they hold 22.2%, 40.2%, 19.5% and 18.1% of the 2,261 simulated applications (mean PD 18.4%).
 
+The score formula (`scoring.pd_to_score`) is `600 + 50 x log2(((1 - PD) / PD) / 5)`, rounded and clipped to 300-850:
+PD 16.7% (odds 5 to 1) scores exactly 600, and PD 2% scores 765 (764.6 before rounding). On the score scale the tier
+boundaries fall at **660.08** (PD 8%), **598.28** (PD 17%) and **545.02** (PD 30%). The tier is assigned from the
+PD, not from the rounded score, so the rounded scores **660, 598 and 545 can belong to either tier** next to them;
+661, 599 and 546 are the first scores always in the lower-risk tier. The overlap is at most one point and does not
+change any tier. The check is in [calibration_report.md](calibration_report.md#score-formula).
+
 - `pillar_ratings.rating`: percentile of the vendor's pillar score among the 2,261 simulated applications, flipped so
   100 = best. Weak < 25 <= Fair < 50 <= Good < 75 <= Strong. Worked out at the median request.
 - `top_reasons`: up to five reasons, chosen by `feature_labels.select_reasons` as follows.
@@ -210,11 +218,13 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
 
 ## Limitations
 
-- **Simulated labels.** The model recovers a simulated scorecard; nothing here is validated on real repayment.
-- **No model clearly beats the visible scorecard baseline** (docs/model_report.md). On the test vendors the random
-  forest (AUC 0.757) and XGBoost (0.753) are level with the scorecard baseline (0.747) within wide, overlapping 95%
-  intervals, and the logistic regression used here scores 0.726 (cross-validated 0.723). The scoring function is a
-  working pipeline with explanations, not evidence that machine learning adds value over the scorecard.
+- **Simulated labels.** The model recovers a simulated scorecard; nothing here is validated on real repayment, and
+  the test set is small, so every interval is wide ([calibration_report.md](calibration_report.md#limits)).
+- **No model clearly beats the visible scorecard baseline.** On the test vendors the random forest and XGBoost are
+  level with the scorecard baseline within wide, overlapping 95% intervals, and the logistic regression used here is
+  a little below them; every paired difference includes zero ([model_report.md](model_report.md#results),
+  [calibration_report.md](calibration_report.md#discrimination-test-set)). The scoring function is a working
+  pipeline with explanations, not evidence that machine learning adds value over the scorecard.
 - **The score is evaluated at the median request.** The trained model's coefficients on the request fields are not
   monotone, so the score ignores the requested amount and term and affordability is reported separately. A
   larger loan therefore does not change the score; it shows only in the affordability band. Fixing this properly
@@ -235,3 +245,10 @@ process takes about 4 to 5 seconds, almost all of it importing `shap` (numba); c
   from, and the score itself never reflects the request.
 - **PDF input.** The PDF reader is validated only on generated text PDFs. Real M-Pesa PDF statements are scanned
   images and are rejected with a message asking for the Excel or CSV version; OCR is future work.
+
+## See also
+
+- [Project README](../README.md)
+- [Scorecard mapping](scorecard_mapping.md)
+- [Model report](model_report.md)
+- [Calibration report](calibration_report.md)

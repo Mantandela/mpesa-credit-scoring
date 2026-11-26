@@ -68,3 +68,17 @@ More applications than the test set, so less noisy. This is the main comparison 
 | author, shock 0.9 | 0.186 | 0.113 | 0.110 | 0.119 | 0.121 | 0.120 |
 
 Per-variant detail is in docs/model_report_v<number>.md (numbers follow the order of the tables).
+
+## Limits
+
+- Every variant uses simulated outcomes, so the table shows how robust the comparison is to the simulation's own
+  settings, not how the models would do on real data.
+- Each test set holds about 60 defaults, so the test intervals are wide and overlap; the cross-validated table is the
+  steadier comparison. See [calibration_report.md](calibration_report.md#limits).
+
+## See also
+
+- [Project README](../README.md)
+- [Model report](model_report.md)
+- [Scorecard report](scorecard_report.md)
+- [Scorecard mapping](scorecard_mapping.md)

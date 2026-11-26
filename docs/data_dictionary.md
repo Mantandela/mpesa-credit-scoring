@@ -249,3 +249,10 @@ What you have is the report (PDF, 88 pages, produced June 2022), not the househo
 - **German Credit:** whether the modelling approach (logistic regression, Random Forest, XGBoost, SHAP, calibration) works on real credit outcomes. It has no transactions and is small, so results are only a sanity check.
 - **FinAccess:** the only source of real Kenyan borrower outcomes. You have the 2021 report (figures only). It gives default and Fuliza rates, but not an informal-sector-only rate. The microdata could, if you download it.
 - **Together:** none contains M-Pesa-style transactions linked to repayment outcomes. The model is trained and tested on synthetic labels. State this in the limitations.
+
+## See also
+
+- [Project README](../README.md)
+- [Personas](personas.md)
+- [Assumptions](assumptions.md)
+- [Cleaning report](cleaning_report.md)
